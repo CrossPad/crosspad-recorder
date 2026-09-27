@@ -1,7 +1,7 @@
 {
   "name": "Recorder",
   "id": "recorder",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Record a sample from the mics, the line-in or the pads, and trim it to a loop",
   "category": "audio",
   "icon": "recorder.png",
@@ -11,10 +11,11 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=1.27.0",
+    "crosspad-core": ">=1.28.0",
     "crosspad-gui": ">=1.14.0"
   },
   "changelog": [
+    "0.4.0: USB input -- what the computer plays into the board over USB audio, before the mixer's fader; says so when the board is not in its USB audio profile; requires core 1.28",
     "0.3.0: PRE -- a bar or two of count-in before a take with the song, the beats counted down; FILES browses the whole card a folder at a time (paged); SAVE always writes into the recordings; requires core 1.27",
     "0.2.0: SYNC -- REC plays the open song from bar FROM and the take lines up with it (frame 0 on that bar, the codecs' delay taken off), the time as bar.beat; ARRANGE puts the marked loop on a track of the song, a synced take where it was sung; requires core 1.26",
     "0.1.0: first version"

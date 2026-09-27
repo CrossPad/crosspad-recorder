@@ -3,7 +3,8 @@
  * @brief Recorder -- a take from the mics, the line-in or the pads, trimmed
  *        front and back to a loop.
  *
- *   top    back, the input (MIC / LINE / PADS, a click cycles), REC/STOP,
+ *   top    back, the input (MIC / LINE / PADS / USB -- what the computer
+ *          plays over USB audio; a click cycles), REC/STOP,
  *          the take's time, FILES (any WAV on the card, a folder at a time)
  *   song   SYNC: REC plays the open song from bar FROM and the take lines up
  *          with it -- its frame 0 is that bar, the codecs' delay taken off --
@@ -341,7 +342,7 @@ void show_transport()
     const crosspad::RecStatus rs = st->recStatus();
     set_text(lv_obj_get_child(s_recBtn, 0), rs.recording ? LV_SYMBOL_STOP " STOP" : "REC");
     set_bg(s_recBtn, rs.recording ? kRec : kPanel);
-    static const char* kInputs[] = {"MIC", "LINE", "PADS"};
+    static const char* kInputs[] = {"MIC", "LINE", "PADS", "USB"};
     set_text(lv_obj_get_child(s_inBtn, 0), kInputs[(int)st->input()]);
     set_bg(s_loopBtn, s_looping ? kAccent : kPanel);
     lv_obj_set_style_text_color(lv_obj_get_child(s_loopBtn, 0), s_looping ? kInk : kText, 0);
@@ -471,8 +472,11 @@ void input_cb(lv_event_t*)
 {
     auto* st = tools();
     if (!st) return;
-    const int next = ((int)st->input() + 1) % 3;
+    const int next = ((int)st->input() + 1) % 4;
     st->selectInput((crosspad::RecInput)next);
+    if (!st->inputAvailable((crosspad::RecInput)next)) {
+        set_text(s_info, "USB records what the computer plays -- switch Settings -> USB to audio.");
+    }
     show_transport();
 }
 
