@@ -1,6 +1,6 @@
 {
     "name": "crosspad-recorder",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "Record a sample from the mics, the line-in or the pads, and trim it to a loop",
     "keywords": [
         "crosspad",

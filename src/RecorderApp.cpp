@@ -5,6 +5,12 @@
  *
  *   top    back, the input (MIC / LINE / PADS, a click cycles), REC/STOP,
  *          the take's time, FILES (the takes on the card)
+ *   song   SYNC: REC plays the open song from bar FROM and the take lines up
+ *          with it -- its frame 0 is that bar, the codecs' delay taken off --
+ *          so a verse is recorded over the beat; the time is then the song's
+ *          bar.beat. -> ARR copies the loop between the markers into the
+ *          song's clips and lays it on a track (a synced take at the bar it
+ *          was sung on, the START marker's part of a bar kept as silence).
  *   meter  left and right peaks of the input, always on
  *   wave   the take: the loop between the START and END markers lit, the
  *          rest dimmed, and the playhead while it is auditioned
@@ -32,6 +38,7 @@
 #include "crosspad/platform/PlatformServices.hpp"
 #include "crosspad/sampletools/ISampleTools.hpp"
 #include "crosspad/sampletools/SliceMath.hpp"
+#include "crosspad/song/ISongEngine.hpp"
 #include "crosspad-gui/components/app_orchestrator.h"
 #include "crosspad-gui/widgets/gui_helpers.h"
 
@@ -89,6 +96,12 @@ lv_obj_t* s_loopBtn = nullptr;
 lv_obj_t* s_barsBtn = nullptr;
 lv_obj_t* s_overlay = nullptr;
 lv_timer_t* s_timer = nullptr;
+lv_obj_t* s_syncBtn = nullptr;
+lv_obj_t* s_fromBtn = nullptr;
+lv_obj_t* s_songLabel = nullptr;
+lv_obj_t* s_trackBtn = nullptr;        // in the To Arrange window
+lv_obj_t* s_barBtn = nullptr;
+lv_obj_t* s_arrInfo = nullptr;
 
 std::string s_file;                    // the take on screen
 uint32_t s_frames = 0;
@@ -110,6 +123,17 @@ bool     s_listPending = false;
 bool     s_savePending = false;
 float    s_level[2] = {};
 
+/* With the song: kept while the board runs, as the Sequencer keeps its tempo. */
+bool     s_sync = false;               // REC plays the song and the take lines up with it
+uint32_t s_from = 0;                   // the bar it plays from, 0-based
+bool     s_fromTouched = false;        // until turned, FROM follows the song's loop region
+bool     s_takeWithSong = false;       // the take on screen: its frame 0 is bar s_takeFrom
+uint32_t s_takeFrom = 0;
+uint8_t  s_arrTrack = 0;               // To Arrange: where the loop goes
+uint32_t s_arrBar = 0;
+uint32_t s_arrLead = 0;                // silence before it, the START marker's part of a bar
+bool     s_importPending = false;
+
 #ifdef REC_USE_ENCODER
 lv_group_t* s_encGroup = nullptr;
 lv_group_t* s_prevEncGroup = nullptr;
@@ -117,6 +141,37 @@ lv_group_t* s_overlayGroup = nullptr;
 #endif
 
 crosspad::ISampleTools* tools() { return crosspad::getPlatformServices().sampleTools; }
+crosspad::ISongEngine* songs() { return crosspad::getPlatformServices().songEngine; }
+
+/// The open song, as far as this screen needs it.
+struct SongView {
+    bool        open = false;
+    std::string name;
+    int         bpm = 0;
+    uint8_t     beatsPerBar = 4;
+    uint32_t    end = 0;               // bars it plays over, region included; 0 = nothing to play
+    uint32_t    regionStart = 0;
+    bool        region = false;
+    uint32_t    spBar = 0;             // at the take's rate
+};
+
+SongView song_view()
+{
+    SongView v;
+    auto* se = songs();
+    if (!se) return v;
+    std::lock_guard<std::recursive_mutex> l(se->songMutex());
+    const crosspad::AudioSong& s = se->song();      // the first look opens the last project
+    v.open = se->openState() == crosspad::SongOpState::Ready;
+    v.name = s.name;
+    v.bpm = (int)lroundf(s.bpm > 0.0f ? s.bpm : crosspad::AudioSong::kDefaultBpm);
+    v.beatsPerBar = s.beatsPerBar;
+    v.region = s.hasRegion();
+    v.regionStart = s.loopStart;
+    v.end = std::max(s.playEnd(), v.region ? s.loopEnd : 0u);
+    v.spBar = s.samplesPerBar(s_rate);
+    return v;
+}
 
 std::string base_of(const std::string& p)
 {
@@ -250,9 +305,15 @@ void show_info()
     } else {
         const uint32_t loop = s_end > s_start ? s_end - s_start : 0;
         const float bpm = crosspad::SliceMath::bpmOf(loop, s_rate, s_bars);
-        std::snprintf(buf, sizeof(buf), "%s  %.2f s | loop %.3f s = %.1f BPM as %u bar%s",
-                      base_of(s_file).c_str(), (double)s_frames / s_rate, (double)loop / s_rate,
-                      (double)bpm, (unsigned)s_bars, s_bars > 1 ? "s" : "");
+        if (s_takeWithSong) {
+            std::snprintf(buf, sizeof(buf), "%s  %.2f s | sung over the song from bar %u | marked %.2f s",
+                          base_of(s_file).c_str(), (double)s_frames / s_rate, (unsigned)(s_takeFrom + 1),
+                          (double)loop / s_rate);
+        } else {
+            std::snprintf(buf, sizeof(buf), "%s  %.2f s | loop %.3f s = %.1f BPM as %u bar%s",
+                          base_of(s_file).c_str(), (double)s_frames / s_rate, (double)loop / s_rate,
+                          (double)bpm, (unsigned)s_bars, s_bars > 1 ? "s" : "");
+        }
     }
     set_text(s_info, buf);
 }
@@ -284,6 +345,44 @@ void show_transport()
     char buf[16];
     std::snprintf(buf, sizeof(buf), "%ub", (unsigned)s_bars);
     set_text(lv_obj_get_child(s_barsBtn, 0), buf);
+    set_bg(s_syncBtn, s_sync ? kAccent : kPanel);
+    lv_obj_set_style_text_color(lv_obj_get_child(s_syncBtn, 0), s_sync ? kInk : kText, 0);
+    std::snprintf(buf, sizeof(buf), "FROM %u", (unsigned)(s_from + 1));
+    set_text(lv_obj_get_child(s_fromBtn, 0), buf);
+}
+
+/// The song row: which song SYNC plays, at what tempo, how long.
+void show_song()
+{
+    if (!s_songLabel) return;
+    const SongView v = song_view();
+    char buf[64];
+    if (!songs())      std::snprintf(buf, sizeof(buf), "no songs on this board");
+    else if (!v.open)  std::snprintf(buf, sizeof(buf), "opening the song ...");
+    else if (!v.end)   std::snprintf(buf, sizeof(buf), "%s: empty", v.name.c_str());
+    else               std::snprintf(buf, sizeof(buf), "%s  %d BPM  %u bars", v.name.c_str(), v.bpm, (unsigned)v.end);
+    set_text(s_songLabel, buf);
+    /* FROM follows the loop region until it is turned by hand. */
+    if (!s_fromTouched && v.open) s_from = v.region ? v.regionStart : 0;
+    if (v.end && s_from >= v.end) s_from = v.end - 1;
+}
+
+/// A number turned with the encoder: a click (or a tap) to turn it, another
+/// to leave. Returns the step a turn asks for, 0 for anything else.
+int number_step(lv_event_t* e)
+{
+    lv_obj_t* b = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+    lv_group_t* g = b ? lv_obj_get_group(b) : nullptr;
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        if (g) {
+            const bool editing = lv_group_get_editing(g) && lv_group_get_focused(g) == b;
+            lv_group_focus_obj(b);
+            lv_group_set_editing(g, !editing);
+        }
+        return 0;
+    }
+    const uint32_t key = lv_event_get_key(e);
+    return key == LV_KEY_RIGHT || key == LV_KEY_UP ? 1 : (key == LV_KEY_LEFT || key == LV_KEY_DOWN ? -1 : 0);
 }
 
 // ── markers ────────────────────────────────────────────────────────────────
@@ -369,17 +468,48 @@ void input_cb(lv_event_t*)
     show_transport();
 }
 
+/// With SYNC, the song plays from FROM and the take starts with it; STOP
+/// stops both.
 void rec_cb(lv_event_t*)
 {
     auto* st = tools();
     if (!st) return;
     if (st->recStatus().recording) {
         st->stopRecording();
+    } else if (s_sync) {
+        const SongView v = song_view();
+        if (!v.open)      set_text(s_info, "The song is not open yet -- is the card in?");
+        else if (!v.end)  set_text(s_info, "SYNC plays the open song, and it is empty: make a beat in Arrange first.");
+        else {
+            st->stopPreview();
+            s_looping = false;
+            if (!st->startRecordingWithSong(std::min(s_from, v.end - 1))) set_text(s_info, "Cannot record now.");
+        }
     } else {
         st->stopPreview();
         s_looping = false;
         if (!st->startRecording() && s_info) set_text(s_info, "Cannot record now.");
     }
+    show_transport();
+}
+
+void sync_cb(lv_event_t*)
+{
+    auto* st = tools();
+    if (st && st->recStatus().recording) return;
+    s_sync = !s_sync;
+    show_song();
+    show_transport();
+}
+
+void from_cb(lv_event_t* e)
+{
+    const int step = number_step(e);
+    if (!step) return;
+    const SongView v = song_view();
+    const int64_t hi = v.end ? (int64_t)v.end - 1 : 0;
+    s_from = (uint32_t)std::max<int64_t>(0, std::min<int64_t>(hi, (int64_t)s_from + step));
+    s_fromTouched = true;
     show_transport();
 }
 
@@ -440,6 +570,7 @@ void close_overlay()
 #endif
     lv_obj_delete_async(s_overlay);
     s_overlay = nullptr;
+    s_trackBtn = s_barBtn = s_arrInfo = nullptr;
 }
 
 std::vector<std::string> s_list;
@@ -448,7 +579,10 @@ void pick_cb(lv_event_t* e)
 {
     const int i = (int)(intptr_t)lv_event_get_user_data(e);
     close_overlay();
-    if (i >= 0 && i < (int)s_list.size()) load_file(s_list[i]);
+    if (i >= 0 && i < (int)s_list.size()) {
+        s_takeWithSong = false;        // a take off the card is not known to line up with anything
+        load_file(s_list[i]);
+    }
     show_info();
 }
 
@@ -552,14 +686,27 @@ void tick_cb(lv_timer_t*)
     const crosspad::RecStatus rs = st->recStatus();
     if (rs.recording) {
         char buf[16];
-        const uint32_t t10 = rs.sampleRate ? (uint32_t)((uint64_t)rs.frames * 10 / rs.sampleRate) : 0;
-        std::snprintf(buf, sizeof(buf), "%02u:%02u.%u", (unsigned)(t10 / 600), (unsigned)(t10 / 10 % 60),
-                      (unsigned)(t10 % 10));
+        auto* se = songs();
+        if (rs.withSong && rs.waiting) {
+            std::snprintf(buf, sizeof(buf), "wait ...");
+        } else if (rs.withSong && se) {
+            /* Where the song is, as bar.beat: what a verse is counted in. */
+            const double pos = se->positionBars();
+            const uint32_t bar = (uint32_t)pos;
+            const uint32_t beat = (uint32_t)((pos - bar) * song_view().beatsPerBar);
+            std::snprintf(buf, sizeof(buf), "bar %u.%u", (unsigned)(bar + 1), (unsigned)(beat + 1));
+        } else {
+            const uint32_t t10 = rs.sampleRate ? (uint32_t)((uint64_t)rs.frames * 10 / rs.sampleRate) : 0;
+            std::snprintf(buf, sizeof(buf), "%02u:%02u.%u", (unsigned)(t10 / 600), (unsigned)(t10 / 10 % 60),
+                          (unsigned)(t10 % 10));
+        }
         set_text(s_timeLabel, buf);
     }
     if (s_wasRecording && !rs.recording) {
         if (rs.error.empty() && rs.frames) {
             s_rate = rs.sampleRate;
+            s_takeWithSong = rs.withSong;
+            s_takeFrom = rs.fromBar;
             load_file(rs.file);
         } else {
             char buf[80];
@@ -602,6 +749,29 @@ void tick_cb(lv_timer_t*)
             request_view(s_wantA, s_wantB);
         }
     }
+
+    /* A loop on its way into the song. */
+    if (s_importPending) {
+        auto* se = songs();
+        const crosspad::SongOpState es = se ? se->editState() : crosspad::SongOpState::Failed;
+        char buf[112];
+        if (es == crosspad::SongOpState::Busy) {
+            std::snprintf(buf, sizeof(buf), "Putting it in the song ... %u%%", (unsigned)se->editProgress());
+        } else {
+            s_importPending = false;
+            if (es == crosspad::SongOpState::Ready) {
+                std::snprintf(buf, sizeof(buf), "On track %u from bar %u -- open Arrange to hear it with the beat.",
+                              (unsigned)(s_arrTrack + 1), (unsigned)(s_arrBar + 1));
+            } else {
+                std::snprintf(buf, sizeof(buf), "Not put in the song: the card did not take it.");
+            }
+            show_song();
+        }
+        set_text(s_info, buf);
+    }
+    /* The song opens after the screen, and can change under it. */
+    static uint8_t songTicks = 0;
+    if (++songTicks >= 20) { songTicks = 0; show_song(); show_transport(); }
 
     /* A moved marker restarts the loop once it has stopped moving. */
     if (s_reloop && lv_tick_elaps(s_movedAt) >= kReloopMs) {
@@ -690,6 +860,194 @@ lv_obj_t* make_meter(lv_obj_t* parent)
     return m;
 }
 
+/// A number the encoder turns (see number_step), in @p g.
+lv_obj_t* make_number(lv_obj_t* parent, int32_t w, int32_t h, lv_event_cb_t cb, lv_group_t* g)
+{
+    lv_obj_t* b = lv_CreateEditableButton(parent);
+    style_button(b, w, h);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_KEY, nullptr);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* l = add_label(b, "");
+    lv_obj_add_flag(l, LV_OBJ_FLAG_EVENT_BUBBLE);
+    if (g) lv_group_add_obj(g, b);
+    return b;
+}
+
+// ── to Arrange ─────────────────────────────────────────────────────────────
+
+/// Bars the loop takes on the song's grid, its lead included.
+uint32_t arr_bars(const SongView& v)
+{
+    const uint32_t len = s_arrLead + (s_end > s_start ? s_end - s_start : 0);
+    return v.spBar ? std::max<uint32_t>(1, (len + v.spBar - 1) / v.spBar) : 1;
+}
+
+/// What the loop would do to the blocks on its track: nothing, or which go.
+void show_arr()
+{
+    auto* se = songs();
+    if (!se || !s_arrInfo) return;
+    const SongView v = song_view();
+    const uint32_t bars = arr_bars(v), to = s_arrBar + bars;
+    int replaced = 0;
+    bool cuts = false;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        for (const auto& c : se->song().tracks[s_arrTrack].clips) {
+            if (c.bar >= s_arrBar && c.bar < to) ++replaced;
+            else if (c.bar < s_arrBar && c.bar + c.bars > s_arrBar) cuts = true;
+        }
+    }
+    char buf[128];
+    int n = std::snprintf(buf, sizeof(buf), "Bars %u-%u on track %u", (unsigned)(s_arrBar + 1), (unsigned)to,
+                          (unsigned)(s_arrTrack + 1));
+    if (!replaced && !cuts) std::snprintf(buf + n, sizeof(buf) - n, ": free.");
+    else std::snprintf(buf + n, sizeof(buf) - n, ": %d block%s there go%s.", replaced, replaced == 1 ? "" : "s",
+                       cuts ? ", the one before is cut" : "");
+    set_text(s_arrInfo, buf);
+    char t[16];
+    std::snprintf(t, sizeof(t), "TRACK %u", (unsigned)(s_arrTrack + 1));
+    set_text(lv_obj_get_child(s_trackBtn, 0), t);
+    std::snprintf(t, sizeof(t), "BAR %u", (unsigned)(s_arrBar + 1));
+    set_text(lv_obj_get_child(s_barBtn, 0), t);
+}
+
+void track_cb(lv_event_t* e)
+{
+    const int step = number_step(e);
+    if (!step) return;
+    s_arrTrack = (uint8_t)std::max(0, std::min(crosspad::AudioSong::kTracks - 1, (int)s_arrTrack + step));
+    show_arr();
+}
+
+void bar_cb(lv_event_t* e)
+{
+    const int step = number_step(e);
+    if (!step) return;
+    s_arrBar = (uint32_t)std::max<int64_t>(0, std::min<int64_t>(998, (int64_t)s_arrBar + step));
+    show_arr();
+}
+
+void put_cb(lv_event_t*)
+{
+    auto* se = songs();
+    if (!se) return;
+    close_overlay();
+    if (se->requestImport(s_file, s_start, s_end, s_arrTrack, s_arrBar, s_arrLead)) {
+        s_importPending = true;
+        set_text(s_info, "Putting it in the song ...");
+    } else {
+        set_text(s_info, "The song is busy -- try again.");
+    }
+}
+
+lv_obj_t* overlay_row()
+{
+    lv_obj_t* r = lv_obj_create(s_overlay);
+    lv_obj_remove_style_all(r);
+    lv_obj_set_size(r, LV_PCT(100), 30);
+    lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(r, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(r, 6, 0);
+    lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+    return r;
+}
+
+/// The marked loop into the song: a synced take goes where it was sung --
+/// the bar under START, the rest of that bar before START kept as silence
+/// -- on the first track with room there; any other take after the last
+/// block of the first empty track. Both can be turned before PUT.
+void arr_cb(lv_event_t*)
+{
+    auto* st = tools();
+    auto* se = songs();
+    if (!st || s_overlay || st->recStatus().recording) return;
+    if (!se) { set_text(s_info, "No songs on this board."); return; }
+    if (!s_frames || s_end <= s_start) { set_text(s_info, "Record a take, or pick one with FILES, first."); return; }
+    const SongView v = song_view();
+    if (!v.open) { set_text(s_info, "The song is not open yet -- is the card in?"); return; }
+    s_arrLead = s_takeWithSong && v.spBar ? s_start % v.spBar : 0;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const crosspad::AudioSong& song = se->song();
+        const int last = crosspad::AudioSong::kTracks - 1;
+        if (s_takeWithSong) {
+            s_arrBar = s_takeFrom + (v.spBar ? s_start / v.spBar : 0);
+            const uint32_t to = s_arrBar + arr_bars(v);
+            s_arrTrack = (uint8_t)last;
+            for (int t = 0; t <= last; ++t) {
+                bool free = true;
+                for (const auto& c : song.tracks[t].clips) free = free && (c.bar + c.bars <= s_arrBar || c.bar >= to);
+                if (free) { s_arrTrack = (uint8_t)t; break; }
+            }
+        } else {
+            s_arrTrack = (uint8_t)last;
+            for (int t = 0; t <= last; ++t) {
+                if (song.tracks[t].clips.empty()) { s_arrTrack = (uint8_t)t; break; }
+            }
+            s_arrBar = song.trackEnd(s_arrTrack);
+        }
+    }
+
+    s_overlay = lv_obj_create(s_root);
+    lv_obj_remove_style_all(s_overlay);
+    lv_obj_set_size(s_overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_add_flag(s_overlay, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_style_bg_color(s_overlay, kBg, 0);
+    lv_obj_set_style_bg_opa(s_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(s_overlay, 8, 0);
+    lv_obj_set_style_pad_row(s_overlay, 8, 0);
+    lv_obj_set_flex_flow(s_overlay, LV_FLEX_FLOW_COLUMN);
+    lv_group_t* g = nullptr;
+#ifdef REC_USE_ENCODER
+    s_overlayGroup = lv_group_create();
+    if (indev_encoderTop) lv_indev_set_group(indev_encoderTop, s_overlayGroup);
+    g = s_overlayGroup;
+#endif
+    lv_obj_t* t = lv_label_create(s_overlay);
+    lv_obj_set_style_text_color(t, kText, 0);
+    lv_obj_set_width(t, LV_PCT(100));
+    lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
+    char buf[80];
+    std::snprintf(buf, sizeof(buf), "To Arrange: %s, %d BPM", v.name.c_str(), v.bpm);
+    lv_label_set_text(t, buf);
+
+    lv_obj_t* src = lv_label_create(s_overlay);
+    lv_obj_set_style_text_font(src, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(src, kDim, 0);
+    std::snprintf(buf, sizeof(buf), "%s, %.2f s from the markers%s", base_of(s_file).c_str(),
+                  (double)(s_end - s_start) / s_rate, s_takeWithSong ? ", where it was sung" : "");
+    lv_label_set_text(src, buf);
+
+    lv_obj_t* row = overlay_row();
+    s_trackBtn = make_number(row, 96, 30, track_cb, g);
+    s_barBtn = make_number(row, 96, 30, bar_cb, g);
+
+    s_arrInfo = lv_label_create(s_overlay);
+    lv_obj_set_style_text_font(s_arrInfo, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_arrInfo, kText, 0);
+    lv_obj_set_width(s_arrInfo, LV_PCT(100));
+    lv_label_set_long_mode(s_arrInfo, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_arrInfo, "");
+
+    lv_obj_t* act = overlay_row();
+    lv_obj_t* put = make_button(act, 96, LV_SYMBOL_OK " PUT", put_cb, nullptr);
+    lv_obj_set_height(put, 30);
+    lv_obj_set_style_bg_color(put, kAccent, 0);
+    lv_obj_set_style_text_color(lv_obj_get_child(put, 0), kInk, 0);
+    lv_obj_t* cancel = make_button(act, 96, LV_SYMBOL_CLOSE " CANCEL", [](lv_event_t*) { close_overlay(); }, nullptr);
+    lv_obj_set_height(cancel, 30);
+#ifdef REC_USE_ENCODER
+    /* make_button() put them in the screen's group; they belong to this one. */
+    for (lv_obj_t* b : {put, cancel}) {
+        lv_group_remove_obj(b);
+        if (g) lv_group_add_obj(g, b);
+    }
+    if (g) lv_group_focus_obj(put);
+#endif
+    show_arr();
+}
+
 } // namespace
 
 lv_obj_t* Recorder_create(lv_obj_t* parent, App* app)
@@ -722,6 +1080,22 @@ lv_obj_t* Recorder_create(lv_obj_t* parent, App* app)
     lv_obj_set_style_text_align(s_timeLabel, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_timeLabel, "00:00.0");
     make_button(top, 50, LV_SYMBOL_DIRECTORY " FILES", files_cb);
+
+    // -- with the song --
+    lv_obj_t* songRow = make_row(s_root, 22);
+    s_syncBtn = make_button(songRow, 44, "SYNC", sync_cb);
+    lv_group_t* encGroup = nullptr;
+#ifdef REC_USE_ENCODER
+    encGroup = s_encGroup;
+#endif
+    s_fromBtn = make_number(songRow, 60, 22, from_cb, encGroup);
+    s_songLabel = lv_label_create(songRow);
+    lv_obj_set_flex_grow(s_songLabel, 1);
+    lv_obj_set_style_text_font(s_songLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_songLabel, kDim, 0);
+    lv_label_set_long_mode(s_songLabel, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_songLabel, "");
+    make_button(songRow, 66, LV_SYMBOL_RIGHT " ARRANGE", arr_cb);
 
     // -- meter --
     s_meter[0] = make_meter(s_root);
@@ -758,6 +1132,7 @@ lv_obj_t* Recorder_create(lv_obj_t* parent, App* app)
     auto* st = tools();
     if (st) st->selectInput(st->input());   // the meter runs from the start
     s_wasRecording = false;
+    show_song();
     show_transport();
     show_marker_labels();
     show_info();
@@ -801,7 +1176,8 @@ void Recorder_destroy(lv_obj_t* root)
     s_root = s_wave = s_inBtn = s_recBtn = s_timeLabel = s_info = nullptr;
     s_meter[0] = s_meter[1] = nullptr;
     s_startBtn = s_endBtn = s_loopBtn = s_barsBtn = nullptr;
-    s_looping = s_reloop = s_ovPending = s_viewWanted = s_listPending = s_savePending = false;
+    s_syncBtn = s_fromBtn = s_songLabel = s_trackBtn = s_barBtn = s_arrInfo = nullptr;
+    s_looping = s_reloop = s_ovPending = s_viewWanted = s_listPending = s_savePending = s_importPending = false;
     s_editStart = s_editEnd = Edit::None;
     s_headX = -1;
 
