@@ -877,6 +877,10 @@ void style_button(lv_obj_t* b, int32_t w, int32_t h)
     lv_obj_set_style_shadow_width(b, 0, 0);
     lv_obj_set_style_bg_color(b, kPanel, 0);
     lv_obj_set_style_bg_color(b, kAccent, LV_STATE_EDITED);
+    /* On the button, not the label: only the button is ever EDITED, and the
+     * label takes the colour from it -- dark on the accent while turned. */
+    lv_obj_set_style_text_color(b, kText, 0);
+    lv_obj_set_style_text_color(b, kInk, LV_STATE_EDITED);
     lv_obj_set_style_outline_color(b, kHead, LV_STATE_FOCUS_KEY);
     lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUS_KEY);
 }
@@ -885,8 +889,6 @@ lv_obj_t* add_label(lv_obj_t* b, const char* text)
 {
     lv_obj_t* l = lv_label_create(b);
     lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(l, kText, 0);
-    lv_obj_set_style_text_color(l, kInk, LV_STATE_EDITED);
     lv_label_set_text(l, text);
     lv_obj_center(l);
     return l;
