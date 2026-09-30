@@ -629,6 +629,15 @@ void entry_cb(lv_event_t* e)
     show_info();
 }
 
+/// Focus as a frame inside the button: the theme's ring stands 4 px out of it,
+/// and the rows these buttons fill cut it to brackets.
+void focus_frame(lv_obj_t* b)
+{
+    lv_obj_set_style_outline_width(b, 0, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_border_color(b, kHead, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_border_width(b, 2, LV_STATE_FOCUS_KEY);
+}
+
 lv_obj_t* overlay_item(const char* text, lv_event_cb_t cb, void* ud)
 {
     lv_obj_t* b = lv_button_create(s_overlay);
@@ -636,8 +645,7 @@ lv_obj_t* overlay_item(const char* text, lv_event_cb_t cb, void* ud)
     lv_obj_set_style_radius(b, 6, 0);
     lv_obj_set_style_shadow_width(b, 0, 0);
     lv_obj_set_style_bg_color(b, kPanel, 0);
-    lv_obj_set_style_outline_color(b, kHead, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUS_KEY);
+    focus_frame(b);
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, ud);
     lv_obj_t* l = lv_label_create(b);
     lv_obj_set_style_text_color(l, kText, 0);
@@ -881,8 +889,7 @@ void style_button(lv_obj_t* b, int32_t w, int32_t h)
      * label takes the colour from it -- dark on the accent while turned. */
     lv_obj_set_style_text_color(b, kText, 0);
     lv_obj_set_style_text_color(b, kInk, LV_STATE_EDITED);
-    lv_obj_set_style_outline_color(b, kHead, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUS_KEY);
+    focus_frame(b);
 }
 
 lv_obj_t* add_label(lv_obj_t* b, const char* text)
