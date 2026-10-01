@@ -962,7 +962,9 @@ lv_obj_t* make_button(lv_obj_t* parent, int32_t w, const char* text, lv_event_cb
 lv_obj_t* make_marker(lv_obj_t* parent, const char* text, bool isStart)
 {
     lv_obj_t* b = lv_CreateEditableButton(parent);
-    style_button(b, 56, 22);
+    /* 46, not 56: a marker never shows more than "START", and the eight pixels
+     * each of them gives up are what PLAY sits in. */
+    style_button(b, 46, 22);
     void* ud = isStart ? (void*)1 : nullptr;
     lv_obj_add_event_cb(b, marker_cb, LV_EVENT_KEY, ud);
     lv_obj_add_event_cb(b, marker_cb, LV_EVENT_CLICKED, ud);
@@ -1115,24 +1117,30 @@ void autotrim_cb(lv_event_t* e)
 }
 
 /// Hear it as a pad will: once, from START, rather than round and round like
-/// LOOP on the screen behind. A one-shot is how this trim is judged -- whether
-/// the hit lands the instant it is struck -- and a loop hides exactly that,
-/// since the second time round there is a tail in front of the attack.
-void settings_play_cb(lv_event_t*)
+/// LOOP beside it. A one-shot is how this trim is judged -- whether the hit
+/// lands the instant it is struck -- and a loop hides exactly that, since the
+/// second time round there is a tail sitting in front of the attack.
+///
+/// @p reportTo is where it answers: the line on the screen, or the Settings
+/// window's own when that is covering it.
+void play_once(lv_obj_t* reportTo)
 {
     auto* st = tools();
     if (!st) return;
     if (!s_frames || s_end <= s_start) {
-        set_text(s_setInfo, "Record a take, or pick one with FILES, first.");
+        set_text(reportTo, "Record a take, or pick one with FILES, first.");
         return;
     }
     st->stopPreview();
     s_looping = false;                 // the loop and the one-shot are not both on
     char buf[64];
     std::snprintf(buf, sizeof(buf), "%.2f s from START", (double)(s_end - s_start) / s_rate);
-    set_text(s_setInfo, st->preview(s_file, s_start, s_end, false) ? buf : "Cannot play now.");
+    set_text(reportTo, st->preview(s_file, s_start, s_end, false) ? buf : "Cannot play now.");
     show_transport();
 }
+
+void play_cb(lv_event_t*)          { play_once(s_info); }
+void settings_play_cb(lv_event_t*) { play_once(s_setInfo); }
 
 /// What the screen does by itself, as against what a button does. One
 /// setting so far; the window is a list so the next one is a row, not a
@@ -1376,10 +1384,11 @@ lv_obj_t* Recorder_create(lv_obj_t* parent, App* app)
     lv_obj_t* tools_row = make_row(s_root, 24);
     s_startBtn = make_marker(tools_row, "START", true);
     s_endBtn = make_marker(tools_row, "END", false);
-    s_loopBtn = make_button(tools_row, 48, LV_SYMBOL_LOOP " LOOP", loop_cb);
+    make_button(tools_row, 28, LV_SYMBOL_PLAY, play_cb);
+    s_loopBtn = make_button(tools_row, 44, LV_SYMBOL_LOOP, loop_cb);
     s_barsBtn = make_button(tools_row, 32, "1b", bars_cb);
     make_button(tools_row, 44, LV_SYMBOL_SAVE " SAVE", save_cb);
-    make_button(tools_row, 52, "SLICE " LV_SYMBOL_RIGHT, slice_cb);
+    make_button(tools_row, 50, "SLICE " LV_SYMBOL_RIGHT, slice_cb);
 
     auto* st = tools();
     if (st) st->selectInput(st->input());   // the meter runs from the start
