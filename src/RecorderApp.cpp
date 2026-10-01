@@ -39,6 +39,8 @@
 #include "crosspad/app/AppRegistrar.hpp"
 #include "crosspad/platform/PlatformServices.hpp"
 #include "crosspad/sampletools/ISampleTools.hpp"
+#include "crosspad/settings/CrosspadSettings.hpp"
+#include "crosspad/settings/ISettingsUI.hpp"
 #include "crosspad/sampletools/SliceMath.hpp"
 #include "crosspad/song/ISongEngine.hpp"
 #include "crosspad-gui/components/app_orchestrator.h"
@@ -126,8 +128,24 @@ bool     s_listPending = false;
 bool     s_savePending = false;
 float    s_level[2] = {};
 
-/* Kept while the board runs, as the Sequencer keeps its tempo. */
-bool     s_autoTrim = false;           // the markers land on the take, not on its ends
+/* Where the markers land on a new take. Persisted, not kept in this file: a
+ * player ticks it once and expects every take after it to arrive trimmed, a
+ * reboot included (CrosspadSettings::recorderAutoTrim). */
+bool auto_trim_on()
+{
+    auto* cfg = crosspad::CrosspadSettings::getInstance();
+    return cfg && cfg->recorderAutoTrim;
+}
+
+void auto_trim_set(bool on)
+{
+    auto* cfg = crosspad::CrosspadSettings::getInstance();
+    if (!cfg || cfg->recorderAutoTrim == on) return;
+    cfg->recorderAutoTrim = on;
+    /* Written now rather than when the screen closes: the board can be
+     * switched off from the transport at any time. */
+    if (auto* ui = crosspad::getSettingsUI()) ui->saveSettings();
+}
 
 /* With the song: kept while the board runs, as the Sequencer keeps its tempo. */
 bool     s_sync = false;               // REC plays the song and the take lines up with it
@@ -837,7 +855,7 @@ void tick_cb(lv_timer_t*)
                         s_loading = false;
                         /* The ends first, so a take with nothing to find keeps
                          * them even if the envelope is unreadable. */
-                        if (s_autoTrim && apply_auto_trim()) {
+                        if (auto_trim_on() && apply_auto_trim()) {
                             set_text(s_info, "Auto trim: the markers are on the take.");
                         }
                         show_marker_labels();
@@ -1082,8 +1100,9 @@ lv_obj_t* overlay_row()
 /// take being trimmed.
 void autotrim_cb(lv_event_t* e)
 {
-    s_autoTrim = lv_obj_has_state((lv_obj_t*)lv_event_get_target(e), LV_STATE_CHECKED);
-    if (s_autoTrim && s_frames) {
+    const bool on = lv_obj_has_state((lv_obj_t*)lv_event_get_target(e), LV_STATE_CHECKED);
+    auto_trim_set(on);
+    if (on && s_frames) {
         if (auto* st = tools()) st->stopPreview();
         s_looping = false;
         if (apply_auto_trim()) set_text(s_info, "Auto trim: the markers are on the take.");
@@ -1132,7 +1151,7 @@ void show_settings()
     lv_obj_set_style_outline_width(cb, 0, LV_STATE_FOCUS_KEY);
     lv_obj_set_style_border_color(cb, kHead, (lv_style_selector_t)LV_PART_INDICATOR | LV_STATE_FOCUS_KEY);
     lv_obj_set_style_border_width(cb, 2, (lv_style_selector_t)LV_PART_INDICATOR | LV_STATE_FOCUS_KEY);
-    if (s_autoTrim) lv_obj_add_state(cb, LV_STATE_CHECKED);
+    if (auto_trim_on()) lv_obj_add_state(cb, LV_STATE_CHECKED);
     lv_obj_add_event_cb(cb, autotrim_cb, LV_EVENT_VALUE_CHANGED, nullptr);
 #ifdef REC_USE_ENCODER
     if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, cb);
