@@ -107,6 +107,7 @@ lv_obj_t* s_songLabel = nullptr;
 lv_obj_t* s_trackBtn = nullptr;        // in the To Arrange window
 lv_obj_t* s_barBtn = nullptr;
 lv_obj_t* s_arrInfo = nullptr;
+lv_obj_t* s_setInfo = nullptr;         // the Settings window answers here, not behind itself
 
 std::string s_file;                    // the take on screen
 uint32_t s_frames = 0;
@@ -626,7 +627,7 @@ void close_overlay()
 #endif
     lv_obj_delete_async(s_overlay);
     s_overlay = nullptr;
-    s_trackBtn = s_barBtn = s_arrInfo = nullptr;
+    s_trackBtn = s_barBtn = s_arrInfo = s_setInfo = nullptr;
 }
 
 /* The card, a folder at a time: FILES opens the recordings, or the folder
@@ -1105,12 +1106,32 @@ void autotrim_cb(lv_event_t* e)
     if (on && s_frames) {
         if (auto* st = tools()) st->stopPreview();
         s_looping = false;
-        if (apply_auto_trim()) set_text(s_info, "Auto trim: the markers are on the take.");
-        else                   set_text(s_info, "Auto trim: nothing to cut off this take.");
+        if (apply_auto_trim()) set_text(s_setInfo, "The markers are on the take.");
+        else                   set_text(s_setInfo, "Nothing to cut off this take.");
         show_marker_labels();
         show_transport();
         if (s_wave) lv_obj_invalidate(s_wave);
     }
+}
+
+/// Hear it as a pad will: once, from START, rather than round and round like
+/// LOOP on the screen behind. A one-shot is how this trim is judged -- whether
+/// the hit lands the instant it is struck -- and a loop hides exactly that,
+/// since the second time round there is a tail in front of the attack.
+void settings_play_cb(lv_event_t*)
+{
+    auto* st = tools();
+    if (!st) return;
+    if (!s_frames || s_end <= s_start) {
+        set_text(s_setInfo, "Record a take, or pick one with FILES, first.");
+        return;
+    }
+    st->stopPreview();
+    s_looping = false;                 // the loop and the one-shot are not both on
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.2f s from START", (double)(s_end - s_start) / s_rate);
+    set_text(s_setInfo, st->preview(s_file, s_start, s_end, false) ? buf : "Cannot play now.");
+    show_transport();
 }
 
 /// What the screen does by itself, as against what a button does. One
@@ -1157,9 +1178,18 @@ void show_settings()
     if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, cb);
 #endif
 
-    overlay_note("START goes to the first transient the take has, END to where\n"
-                 "the sound stops -- the room before and after is left out of\n"
-                 "the loop. A take with no silence to cut keeps its ends.");
+    overlay_note("START goes to the take's attack, END to where the sound\n"
+                 "stops -- the room before and after is left out of the loop.\n"
+                 "A take with no silence to cut keeps its ends.");
+
+    overlay_item(LV_SYMBOL_PLAY " Play it once, as a pad would", settings_play_cb, nullptr);
+
+    s_setInfo = lv_label_create(s_overlay);
+    lv_obj_set_style_text_font(s_setInfo, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_setInfo, kDim, 0);
+    lv_obj_set_width(s_setInfo, LV_PCT(100));
+    lv_label_set_long_mode(s_setInfo, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_setInfo, "");
 
     overlay_item(LV_SYMBOL_CLOSE " Close", [](lv_event_t*) { close_overlay(); }, nullptr);
 #ifdef REC_USE_ENCODER
@@ -1399,6 +1429,7 @@ void Recorder_destroy(lv_obj_t* root)
     s_meter[0] = s_meter[1] = nullptr;
     s_startBtn = s_endBtn = s_loopBtn = s_barsBtn = nullptr;
     s_syncBtn = s_preBtn = s_fromBtn = s_songLabel = s_trackBtn = s_barBtn = s_arrInfo = nullptr;
+    s_setInfo = nullptr;
     s_looping = s_reloop = s_ovPending = s_viewWanted = s_listPending = s_savePending = s_importPending = false;
     s_editStart = s_editEnd = Edit::None;
     s_headX = -1;
