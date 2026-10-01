@@ -126,6 +126,9 @@ bool     s_listPending = false;
 bool     s_savePending = false;
 float    s_level[2] = {};
 
+/* Kept while the board runs, as the Sequencer keeps its tempo. */
+bool     s_autoTrim = false;           // the markers land on the take, not on its ends
+
 /* With the song: kept while the board runs, as the Sequencer keeps its tempo. */
 bool     s_sync = false;               // REC plays the song and the take lines up with it
 uint32_t s_from = 0;                   // the bar it plays from, 0-based
@@ -222,6 +225,20 @@ void load_file(const std::string& path)
     s_editStart = s_editEnd = Edit::None;
     request_view(0, 0);
     if (s_wave) lv_obj_invalidate(s_wave);
+}
+
+/// Put the markers where the take sounds. Reads the envelope that came with
+/// the picture, so it costs no card: the whole take is one overview, and its
+/// hop is ~5 ms, which is the accuracy a transient is found to before the
+/// guard either side is added.
+bool apply_auto_trim()
+{
+    if (!s_frames || s_ov.envelope.empty()) return false;
+    const crosspad::SliceMath::TrimPoints t =
+        crosspad::SliceMath::autoTrim(s_ov.envelope, s_ov.hop, s_ov.start, s_frames, s_rate);
+    s_start = t.start;
+    s_end   = t.end;
+    return t.start != 0 || t.end != s_frames;
 }
 
 void fill(lv_layer_t* layer, int32_t x1, int32_t y1, int32_t x2, int32_t y2, lv_color_t c)
@@ -814,7 +831,17 @@ void tick_cb(lv_timer_t*)
                     s_ov = std::move(ov);
                     s_frames = s_ov.frames;
                     if (s_ov.sampleRate) s_rate = s_ov.sampleRate;
-                    if (s_loading) { s_start = 0; s_end = s_frames; s_loading = false; }
+                    if (s_loading) {
+                        s_start = 0;
+                        s_end = s_frames;
+                        s_loading = false;
+                        /* The ends first, so a take with nothing to find keeps
+                         * them even if the envelope is unreadable. */
+                        if (s_autoTrim && apply_auto_trim()) {
+                            set_text(s_info, "Auto trim: the markers are on the take.");
+                        }
+                        show_marker_labels();
+                    }
                 }
             } else {
                 set_text(s_info, st->jobResult().c_str());
@@ -1047,6 +1074,86 @@ lv_obj_t* overlay_row()
     return r;
 }
 
+// ── settings ───────────────────────────────────────────────────────────────
+
+/// Ticking it is a request to see it: the take already on screen is trimmed
+/// now rather than at the next one. Unticking leaves the markers where they
+/// are -- they may have been turned by hand since -- and only stops the next
+/// take being trimmed.
+void autotrim_cb(lv_event_t* e)
+{
+    s_autoTrim = lv_obj_has_state((lv_obj_t*)lv_event_get_target(e), LV_STATE_CHECKED);
+    if (s_autoTrim && s_frames) {
+        if (auto* st = tools()) st->stopPreview();
+        s_looping = false;
+        if (apply_auto_trim()) set_text(s_info, "Auto trim: the markers are on the take.");
+        else                   set_text(s_info, "Auto trim: nothing to cut off this take.");
+        show_marker_labels();
+        show_transport();
+        if (s_wave) lv_obj_invalidate(s_wave);
+    }
+}
+
+/// What the screen does by itself, as against what a button does. One
+/// setting so far; the window is a list so the next one is a row, not a
+/// redesign.
+void show_settings()
+{
+    s_overlay = lv_obj_create(s_root);
+    lv_obj_remove_style_all(s_overlay);
+    lv_obj_set_size(s_overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_add_flag(s_overlay, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_style_bg_color(s_overlay, kBg, 0);
+    lv_obj_set_style_bg_opa(s_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(s_overlay, 6, 0);
+    lv_obj_set_style_pad_row(s_overlay, 5, 0);
+    lv_obj_set_flex_flow(s_overlay, LV_FLEX_FLOW_COLUMN);
+#ifdef REC_USE_ENCODER
+    s_overlayGroup = lv_group_create();
+    if (indev_encoderTop) lv_indev_set_group(indev_encoderTop, s_overlayGroup);
+#endif
+    lv_obj_t* t = lv_label_create(s_overlay);
+    lv_obj_set_style_text_color(t, kText, 0);
+    lv_label_set_text(t, LV_SYMBOL_SETTINGS " Settings");
+
+    lv_obj_t* cb = lv_checkbox_create(s_overlay);
+    lv_checkbox_set_text(cb, "Auto trim");
+    lv_obj_set_width(cb, LV_PCT(100));
+    lv_obj_set_style_text_color(cb, kText, 0);
+    lv_obj_set_style_bg_color(cb, kPanel, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(cb, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_border_color(cb, kDim, LV_PART_INDICATOR);
+    lv_obj_set_style_border_width(cb, 1, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(cb, 4, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(cb, kAccent, (lv_style_selector_t)LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_text_color(cb, kInk, (lv_style_selector_t)LV_PART_INDICATOR | LV_STATE_CHECKED);
+    /* The focus ring goes on the box, where the eye is; the theme's outline
+     * round the whole row reads as the label being selected. */
+    lv_obj_set_style_outline_width(cb, 0, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_border_color(cb, kHead, (lv_style_selector_t)LV_PART_INDICATOR | LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_border_width(cb, 2, (lv_style_selector_t)LV_PART_INDICATOR | LV_STATE_FOCUS_KEY);
+    if (s_autoTrim) lv_obj_add_state(cb, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(cb, autotrim_cb, LV_EVENT_VALUE_CHANGED, nullptr);
+#ifdef REC_USE_ENCODER
+    if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, cb);
+#endif
+
+    overlay_note("START goes to the first transient the take has, END to where\n"
+                 "the sound stops -- the room before and after is left out of\n"
+                 "the loop. A take with no silence to cut keeps its ends.");
+
+    overlay_item(LV_SYMBOL_CLOSE " Close", [](lv_event_t*) { close_overlay(); }, nullptr);
+#ifdef REC_USE_ENCODER
+    if (s_overlayGroup) lv_group_focus_obj(cb);
+#endif
+}
+
+void settings_cb(lv_event_t*)
+{
+    if (s_overlay) return;
+    show_settings();
+}
+
 /// The marked loop into the song: a synced take goes where it was sung --
 /// the bar under START, the rest of that bar before START kept as silence
 /// -- on the first track with room there; any other take after the last
@@ -1174,6 +1281,7 @@ lv_obj_t* Recorder_create(lv_obj_t* parent, App* app)
     lv_obj_set_style_text_align(s_timeLabel, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_timeLabel, "00:00.0");
     make_button(top, 50, LV_SYMBOL_DIRECTORY " FILES", files_cb);
+    make_button(top, 26, LV_SYMBOL_SETTINGS, settings_cb);
 
     // -- with the song --
     lv_obj_t* songRow = make_row(s_root, 22);
