@@ -37,11 +37,17 @@
 #endif
 
 #include "crosspad/app/AppRegistrar.hpp"
+#include "crosspad/instrument/IInstrumentHost.hpp"
+#include "crosspad/instrument/InstrumentPadLogic.hpp"
+#include "crosspad/instrument/InstrumentPlayState.hpp"
+#include "crosspad/pad/PadManager.hpp"
 #include "crosspad/platform/PlatformServices.hpp"
 #include "crosspad/sampletools/ISampleTools.hpp"
 #include "crosspad/settings/CrosspadSettings.hpp"
 #include "crosspad/settings/ISettingsUI.hpp"
 #include "crosspad/sampletools/SliceMath.hpp"
+#include "crosspad-gui/components/mode_overlay.h"
+#include "crosspad/song/ArrangeFocus.hpp"
 #include "crosspad/song/ISongEngine.hpp"
 #include "crosspad-gui/components/app_orchestrator.h"
 #include "crosspad-gui/widgets/gui_helpers.h"
@@ -378,7 +384,7 @@ void show_transport()
     const crosspad::RecStatus rs = st->recStatus();
     set_text(lv_obj_get_child(s_recBtn, 0), rs.recording ? LV_SYMBOL_STOP " STOP" : "REC");
     set_bg(s_recBtn, rs.recording ? kRec : kPanel);
-    static const char* kInputs[] = {"MIC", "LINE", "PADS", "USB"};
+    static const char* kInputs[] = {"MIC", "LINE", "PADS", "USB", "PITCH"};
     set_text(lv_obj_get_child(s_inBtn, 0), kInputs[(int)st->input()]);
     set_bg(s_loopBtn, s_looping ? kAccent : kPanel);
     lv_obj_set_style_text_color(lv_obj_get_child(s_loopBtn, 0), s_looping ? kInk : kText, 0);
@@ -504,13 +510,110 @@ void back_cb(lv_event_t* e)
     if (app) app->destroyAppAsync();
 }
 
+crosspad::IInstrumentHost* inst_host() { return crosspad::getPlatformServices().instrumentHost; }
+
+/* PITCH: the pads play the instrument Pitch Play has, and the take is that,
+ * digital, off the same bus PADS records. There is no instrument picker here
+ * on purpose -- one place sets the instrument and the key it is played in,
+ * and that place is Pitch Play (core's InstrumentPlayState). This borrows the
+ * engine for whatever is set there and gives it back on the way out. */
+bool s_pitchHeld = false;          ///< this app took the engine and owes it back
+bool s_pitchReady = false;         ///< the bank is installed and the pads sound
+bool s_padsHeld = false;           ///< the pad logic is pushed
+
+/* The pads making the notes is core's behaviour, the same object the
+ * Sequencer pushes for its own instrument source: one place decides what a
+ * pad plays, and it is InstrumentPlayState. */
+constexpr const char* kPitchPadLogic = "RecPitch";
+std::shared_ptr<crosspad::InstrumentPadLogic> s_pitchPadLogic;
+
+void pitch_drop_pads()
+{
+    if (!s_padsHeld) return;
+    crosspad::getPadManager().popPadLogic();
+    s_padsHeld = false;
+}
+
+/// Before Ready, so a hit in the gap is silent rather than a kit pad into a
+/// take that is meant to be the instrument.
+void pitch_take_pads()
+{
+    if (s_padsHeld) return;
+    auto& pm = crosspad::getPadManager();
+    if (!s_pitchPadLogic) {
+        s_pitchPadLogic = std::make_shared<crosspad::InstrumentPadLogic>();
+        pm.registerPadLogic(kPitchPadLogic, s_pitchPadLogic);
+    }
+    pm.pushPadLogic(kPitchPadLogic);
+    s_padsHeld = true;
+}
+
+void pitch_release()
+{
+    pitch_drop_pads();
+    if (s_pitchPadLogic) s_pitchPadLogic->setReady(false);
+    s_pitchReady = false;
+    if (!s_pitchHeld) return;
+    s_pitchHeld = false;
+    if (auto* h = inst_host()) h->release();   // the current kit loads again
+}
+
+void pitch_take()
+{
+    auto* h = inst_host();
+    const auto& ps = crosspad::instrumentPlayState();
+    if (!h) { set_text(s_info, "No instrument engine on this build."); return; }
+    if (ps.instrumentPath.empty()) {
+        set_text(s_info, "Open an instrument in Pitch Play first -- PITCH records that one.");
+        return;
+    }
+    if (!h->requestOpen(ps.instrumentPath)) { set_text(s_info, "The engine is busy -- try again."); return; }
+    s_pitchHeld = true;
+    s_pitchReady = false;
+    pitch_take_pads();
+    set_text(s_info, ("Loading " + ps.instrumentName + " ...").c_str());
+}
+
+/// From the app tick: the load runs on the host's worker, so the pads are
+/// opened only once it reports the bank is playing.
+void pitch_poll()
+{
+    if (!s_pitchHeld) return;
+    auto* h = inst_host();
+    if (!h) return;
+    /* Pitch Play may have been opened and the key changed while this app sat
+     * behind it; the pads read the map live, so only the gate is polled. */
+    switch (h->state()) {
+    case crosspad::IInstrumentHost::State::Ready:
+        if (!s_pitchReady) {
+            s_pitchReady = true;
+            if (s_pitchPadLogic) s_pitchPadLogic->setReady(true);
+            const std::string msg = h->message();
+            set_text(s_info, msg.empty() ? "The pads play it -- REC records what they play." : msg.c_str());
+        }
+        break;
+    case crosspad::IInstrumentHost::State::Failed: {
+        const std::string why = h->message();
+        pitch_release();
+        set_text(s_info, why.empty() ? "Could not load that instrument." : why.c_str());
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 void input_cb(lv_event_t*)
 {
     auto* st = tools();
     if (!st) return;
-    const int next = ((int)st->input() + 1) % 4;
+    const int cur  = (int)st->input();
+    const int next = (cur + 1) % 5;
+    if (cur == (int)crosspad::RecInput::Pitch) pitch_release();
     st->selectInput((crosspad::RecInput)next);
-    if (!st->inputAvailable((crosspad::RecInput)next)) {
+    if (next == (int)crosspad::RecInput::Pitch) {
+        pitch_take();                 // says itself why, when it cannot
+    } else if (!st->inputAvailable((crosspad::RecInput)next)) {
         set_text(s_info, "USB records what the computer plays -- switch Settings -> USB to audio.");
     }
     show_transport();
@@ -783,6 +886,8 @@ bool back_handler(lv_obj_t*)
 
 void tick_cb(lv_timer_t*)
 {
+    pitch_poll();
+
     auto* st = tools();
     if (!st) return;
 
@@ -901,6 +1006,15 @@ void tick_cb(lv_timer_t*)
             if (es == crosspad::SongOpState::Ready) {
                 std::snprintf(buf, sizeof(buf), "On track %u from bar %u -- open Arrange to hear it with the beat.",
                               (unsigned)(s_arrTrack + 1), (unsigned)(s_arrBar + 1));
+                /* Arrange sent us here to fill a track and the take is on it:
+                 * the loop closes where it started, and nothing is being
+                 * filled any more. */
+                crosspad::ArrangeFocus& f = crosspad::arrangeFocus();
+                if (f.held() && !f.seq) {
+                    f.clear();
+                    crosspad_gui::mode_overlay_open_app("Arrange");
+                    return;
+                }
             } else {
                 std::snprintf(buf, sizeof(buf), "Not put in the song: the card did not take it.");
             }
@@ -1245,6 +1359,15 @@ void arr_cb(lv_event_t*)
             }
             s_arrBar = song.trackEnd(s_arrTrack);
         }
+        /* Arrange sent us to fill one particular track: that one, whatever
+         * the guess above picked. The player chose AUDIO on "New track" and
+         * this take is what goes on it -- putting it anywhere else would
+         * leave the track they just made empty. Still turnable before PUT. */
+        const crosspad::ArrangeFocus& f = crosspad::arrangeFocus();
+        if (f.held() && !f.seq && song.tracks[f.track].kind != crosspad::TrackKind::Seq) {
+            s_arrTrack = (uint8_t)f.track;
+            if (!s_takeWithSong) s_arrBar = song.trackEnd(s_arrTrack);
+        }
     }
 
     s_overlay = lv_obj_create(s_root);
@@ -1430,6 +1553,9 @@ void Recorder_destroy(lv_obj_t* root)
     /* A take still running is finished and kept; the codec input goes back
      * to what the capture preset had. */
     if (auto* st = tools()) st->releaseInput();
+    /* And the engine, if PITCH had it: the kit loads again, so the launcher's
+     * pads are the kit's. */
+    pitch_release();
 #ifdef REC_USE_ENCODER
     if (s_overlayGroup) { lv_group_delete(s_overlayGroup); s_overlayGroup = nullptr; }
 #endif
@@ -1454,7 +1580,9 @@ void Recorder_destroy(lv_obj_t* root)
     lv_obj_delete_async(root);
 }
 
-// No pad logic: the pads play the kit, which is what a PADS take records.
+/* No padLogicName in the registration on purpose: the pads play the kit,
+ * which is what a PADS take records, and PITCH pushes core's instrument logic
+ * for as long as it holds the engine. */
 REGISTER_APP(Recorder, nullptr, "recorder.png",
              Recorder_create, Recorder_destroy,
              nullptr, nullptr, nullptr, 0)
