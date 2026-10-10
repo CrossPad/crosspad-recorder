@@ -8,7 +8,9 @@
  *          the take's time, FILES (any WAV on the card, a folder at a time)
  *   song   SYNC: REC plays the open song from bar FROM and the take lines up
  *          with it -- its frame 0 is that bar, the codecs' delay taken off --
- *          so a verse is recorded over the beat; the time is then the song's
+ *          so a verse is recorded over the beat; a song already playing is
+ *          not restarted, the take goes in at its next bar line; sent here by
+ *          Arrange, SYNC is on and FROM is where its playhead stood; the time is then the song's
  *          bar.beat. PRE counts one or two bars in first, on the metronome's
  *          click, and the time counts the beats down. -> ARR copies the loop between the markers into the
  *          song's clips and lays it on a track (a synced take at the bar it
@@ -619,8 +621,9 @@ void input_cb(lv_event_t*)
     show_transport();
 }
 
-/// With SYNC, the song plays from FROM and the take starts with it; STOP
-/// stops both.
+/// With SYNC, the song plays from FROM and the take starts with it -- or,
+/// with the song already playing (the transport bar's PLAY), goes in at its
+/// next bar line; STOP stops both.
 void rec_cb(lv_event_t*)
 {
     auto* st = tools();
@@ -1439,6 +1442,17 @@ lv_obj_t* Recorder_create(lv_obj_t* parent, App* app)
     if (indev_encoderTop) lv_indev_set_group(indev_encoderTop, s_encGroup);
 #endif
     s_container = parent;
+
+    /* Sent by Arrange to fill an audio track: the take is for that song, from
+     * where its playhead stood -- SYNC on, FROM there. */
+    {
+        const crosspad::ArrangeFocus& f = crosspad::arrangeFocus();
+        if (f.held() && !f.seq) {
+            s_sync = true;
+            s_from = f.bar;
+            s_fromTouched = true;
+        }
+    }
 
     s_root = lv_obj_create(parent);
     lv_obj_set_size(s_root, LV_PCT(100), LV_PCT(100));
