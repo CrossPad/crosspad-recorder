@@ -76,6 +76,7 @@ constexpr uint16_t kCols       = 300;     // columns of the picture
 constexpr uint32_t kTickMs     = 50;
 constexpr uint32_t kZoomFrames = 12000;   // each side of a marker in fine mode, ~0.25 s
 constexpr uint32_t kReloopMs   = 150;     // a marker still for this long restarts the loop
+constexpr uint32_t kProgressMs = 300;     // a redraw this slow gets a progress bar; a new take gets one at once
 
 const lv_color_t kBg     = lv_color_hex(0x16181B);
 const lv_color_t kPanel  = lv_color_hex(0x20242A);
@@ -101,6 +102,9 @@ lv_obj_t* s_inBtn = nullptr;
 lv_obj_t* s_recBtn = nullptr;
 lv_obj_t* s_timeLabel = nullptr;
 lv_obj_t* s_info = nullptr;
+lv_obj_t* s_progress = nullptr;        // over the picture while it is being drawn
+lv_obj_t* s_progressBar = nullptr;
+lv_obj_t* s_progressLabel = nullptr;
 lv_obj_t* s_meter[2] = {};
 lv_obj_t* s_startBtn = nullptr;
 lv_obj_t* s_endBtn = nullptr;
@@ -123,6 +127,7 @@ uint32_t s_rate = 48000;
 uint32_t s_start = 0, s_end = 0;       // the loop
 crosspad::WaveOverview s_ov;           // the picture drawn
 bool     s_ovPending = false;
+uint32_t s_ovAskedAt = 0;
 bool     s_viewWanted = false;         // a picture asked for while a job ran
 uint32_t s_wantA = 0, s_wantB = 0;
 bool     s_loading = false;            // markers go to the ends when the picture comes
@@ -231,6 +236,7 @@ void request_view(uint32_t a, uint32_t b)
     if (!st || s_file.empty()) return;
     if (st->requestOverview(s_file, a, b, kCols)) {
         s_ovPending = true;
+        s_ovAskedAt = lv_tick_get();
         s_viewWanted = false;
     } else {
         s_viewWanted = true;           // a job is running; asked again from the timer
@@ -364,6 +370,24 @@ void show_info()
         }
     }
     set_text(s_info, buf);
+}
+
+/// A take of minutes is seconds of card to draw: the picture says how far it
+/// is. A new take shows it at once, a redraw only if it is slow.
+void show_progress(crosspad::ISampleTools* st)
+{
+    if (!s_progress) return;
+    const bool waiting = s_ovPending || s_viewWanted;
+    if (!waiting || !(s_loading || lv_tick_elaps(s_ovAskedAt) >= kProgressMs)) {
+        if (!lv_obj_has_flag(s_progress, LV_OBJ_FLAG_HIDDEN)) lv_obj_add_flag(s_progress, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    const uint32_t pct = s_ovPending && st->job() == crosspad::ToolJob::Busy ? st->jobProgress() : 0;
+    if (lv_bar_get_value(s_progressBar) != (int32_t)pct) lv_bar_set_value(s_progressBar, (int32_t)pct, LV_ANIM_OFF);
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "Drawing the take ... %u%%", (unsigned)pct);
+    set_text(s_progressLabel, buf);
+    if (lv_obj_has_flag(s_progress, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(s_progress, LV_OBJ_FLAG_HIDDEN);
 }
 
 void show_marker_labels()
@@ -996,6 +1020,7 @@ void tick_cb(lv_timer_t*)
             request_view(s_wantA, s_wantB);
         }
     }
+    show_progress(st);
 
     /* A loop on its way into the song. */
     if (s_importPending) {
@@ -1510,6 +1535,30 @@ lv_obj_t* Recorder_create(lv_obj_t* parent, App* app)
     lv_obj_remove_flag(s_wave, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_wave, wave_draw_cb, LV_EVENT_DRAW_MAIN_END, nullptr);
 
+    s_progress = lv_obj_create(s_wave);
+    lv_obj_remove_style_all(s_progress);
+    lv_obj_set_size(s_progress, LV_PCT(70), LV_SIZE_CONTENT);
+    lv_obj_center(s_progress);
+    lv_obj_set_flex_flow(s_progress, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_progress, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(s_progress, 4, 0);
+    lv_obj_remove_flag(s_progress, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(s_progress, LV_OBJ_FLAG_CLICKABLE);
+    s_progressLabel = lv_label_create(s_progress);
+    lv_obj_set_style_text_font(s_progressLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_progressLabel, kText, 0);
+    lv_label_set_text(s_progressLabel, "");
+    s_progressBar = lv_bar_create(s_progress);
+    lv_obj_set_size(s_progressBar, LV_PCT(100), 6);
+    lv_bar_set_range(s_progressBar, 0, 100);
+    lv_obj_set_style_radius(s_progressBar, 3, 0);
+    lv_obj_set_style_radius(s_progressBar, 3, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_progressBar, kBg, 0);
+    lv_obj_set_style_bg_opa(s_progressBar, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_progressBar, kWave, LV_PART_INDICATOR);
+    lv_obj_set_style_anim_duration(s_progressBar, 0, 0);
+    lv_obj_add_flag(s_progress, LV_OBJ_FLAG_HIDDEN);
+
     s_info = lv_label_create(s_root);
     lv_obj_set_style_text_font(s_info, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_info, kDim, 0);
@@ -1575,6 +1624,7 @@ void Recorder_destroy(lv_obj_t* root)
 #endif
     s_overlay = nullptr;
     s_root = s_wave = s_inBtn = s_recBtn = s_timeLabel = s_info = nullptr;
+    s_progress = s_progressBar = s_progressLabel = nullptr;
     s_meter[0] = s_meter[1] = nullptr;
     s_startBtn = s_endBtn = s_loopBtn = s_barsBtn = nullptr;
     s_syncBtn = s_preBtn = s_fromBtn = s_songLabel = s_trackBtn = s_barBtn = s_arrInfo = nullptr;
