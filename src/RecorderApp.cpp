@@ -1725,7 +1725,7 @@ void Recorder_destroy(lv_obj_t* root)
     }
     s_prevEncGroup = nullptr;
 #endif
-    lv_obj_delete_async(root);
+    if (root) lv_obj_delete_async(root);
 }
 
 /* No padLogicName in the registration on purpose: the pads play the kit,
