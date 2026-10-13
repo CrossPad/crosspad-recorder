@@ -1,7 +1,7 @@
 {
   "name": "Recorder",
   "id": "recorder",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Record a sample from the mics, the line-in or the pads, and trim it to a loop",
   "category": "audio",
   "icon": "recorder.png",
@@ -11,10 +11,11 @@
     "pc"
   ],
   "requires": {
-    "crosspad-core": ">=1.28.0",
-    "crosspad-gui": ">=1.14.0"
+    "crosspad-core": "^2.0.0",
+    "crosspad-gui": "^2.0.0"
   },
   "changelog": [
+    "0.5.1: requires crosspad-core 2.0 and crosspad-gui 2.0 (^2.0.0); a root deleted before the app's teardown is handled (gui 2.0 calls destroy with none)",
     "0.5.0: Opened from Arrange's CLIP EDIT on an audio block, the Recorder loads that block's clip with the markers on the part of the file the block plays; ARR puts the trimmed clip back on the block's bar in place of the block it came from (one undo step), or goes back without a change.",
     "0.4.2: focus is a white frame inside the button, not the theme's ring -- that stands 4 px out and the 22 px rows cut it to brackets",
     "0.4.1: A value being turned reads dark on the accent: the text colour sits on the button, which is the only thing ever EDITED, not on its label",
