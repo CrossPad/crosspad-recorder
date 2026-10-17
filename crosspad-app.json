@@ -1,7 +1,7 @@
 {
   "name": "Recorder",
   "id": "recorder",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Record a sample from the mics, the line-in or the pads, and trim it to a loop",
   "category": "audio",
   "icon": "recorder.png",
@@ -15,6 +15,7 @@
     "crosspad-gui": ">=1.14.0"
   },
   "changelog": [
+    "0.5.0: Opened from Arrange's CLIP EDIT on an audio block, the Recorder loads that block's clip with the markers on the part of the file the block plays; ARR puts the trimmed clip back on the block's bar in place of the block it came from (one undo step), or goes back without a change.",
     "0.4.2: focus is a white frame inside the button, not the theme's ring -- that stands 4 px out and the 22 px rows cut it to brackets",
     "0.4.1: A value being turned reads dark on the accent: the text colour sits on the button, which is the only thing ever EDITED, not on its label",
     "0.4.0: USB input -- what the computer plays into the board over USB audio, before the mixer's fader; says so when the board is not in its USB audio profile; requires core 1.28",

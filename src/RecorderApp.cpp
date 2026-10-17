@@ -8,11 +8,16 @@
  *          the take's time, FILES (any WAV on the card, a folder at a time)
  *   song   SYNC: REC plays the open song from bar FROM and the take lines up
  *          with it -- its frame 0 is that bar, the codecs' delay taken off --
- *          so a verse is recorded over the beat; the time is then the song's
+ *          so a verse is recorded over the beat; a song already playing is
+ *          not restarted, the take goes in at its next bar line; sent here by
+ *          Arrange, SYNC is on and FROM is where its playhead stood; the time is then the song's
  *          bar.beat. PRE counts one or two bars in first, on the metronome's
  *          click, and the time counts the beats down. -> ARR copies the loop between the markers into the
  *          song's clips and lays it on a track (a synced take at the bar it
  *          was sung on, the START marker's part of a bar kept as silence).
+ *          CLIP EDIT on an Arrange audio block opens that block here: its
+ *          WAV, the markers on the part of it the block plays; trimmed and
+ *          put back, it takes the block's place, every frame where it was.
  *   meter  left and right peaks of the input, always on
  *   wave   the take: the loop between the START and END markers lit, the
  *          rest dimmed, and the playhead while it is auditioned
@@ -74,6 +79,7 @@ constexpr uint16_t kCols       = 300;     // columns of the picture
 constexpr uint32_t kTickMs     = 50;
 constexpr uint32_t kZoomFrames = 12000;   // each side of a marker in fine mode, ~0.25 s
 constexpr uint32_t kReloopMs   = 150;     // a marker still for this long restarts the loop
+constexpr uint32_t kProgressMs = 300;     // a redraw this slow gets a progress bar; a new take gets one at once
 
 const lv_color_t kBg     = lv_color_hex(0x16181B);
 const lv_color_t kPanel  = lv_color_hex(0x20242A);
@@ -99,6 +105,9 @@ lv_obj_t* s_inBtn = nullptr;
 lv_obj_t* s_recBtn = nullptr;
 lv_obj_t* s_timeLabel = nullptr;
 lv_obj_t* s_info = nullptr;
+lv_obj_t* s_progress = nullptr;        // over the picture while it is being drawn
+lv_obj_t* s_progressBar = nullptr;
+lv_obj_t* s_progressLabel = nullptr;
 lv_obj_t* s_meter[2] = {};
 lv_obj_t* s_startBtn = nullptr;
 lv_obj_t* s_endBtn = nullptr;
@@ -121,6 +130,7 @@ uint32_t s_rate = 48000;
 uint32_t s_start = 0, s_end = 0;       // the loop
 crosspad::WaveOverview s_ov;           // the picture drawn
 bool     s_ovPending = false;
+uint32_t s_ovAskedAt = 0;
 bool     s_viewWanted = false;         // a picture asked for while a job ran
 uint32_t s_wantA = 0, s_wantB = 0;
 bool     s_loading = false;            // markers go to the ends when the picture comes
@@ -159,8 +169,16 @@ bool     s_sync = false;               // REC plays the song and the take lines 
 uint32_t s_from = 0;                   // the bar it plays from, 0-based
 bool     s_fromTouched = false;        // until turned, FROM follows the song's loop region
 uint8_t  s_preBars = 0;                // count-in before a take with the song: 0, 1 or 2 bars
-bool     s_takeWithSong = false;       // the take on screen: its frame 0 is bar s_takeFrom
+bool     s_takeWithSong = false;       // the take on screen: its frame s_takeOrigin is bar s_takeFrom
 uint32_t s_takeFrom = 0;
+uint32_t s_takeOrigin = 0;             // 0 for a take; an Arrange block's offset into its file
+/* An Arrange block opened by CLIP EDIT: where the markers go once the picture
+ * comes (the part the block plays, 0 = to the file's end), and which block it
+ * is, so PUT can take it out before its trimmed copy goes in. */
+bool     s_block = false;
+uint32_t s_blockA = 0, s_blockB = 0;
+crosspad::SongClip s_blockClip;
+uint8_t  s_blockTrack = 0;
 uint8_t  s_arrTrack = 0;               // To Arrange: where the loop goes
 uint32_t s_arrBar = 0;
 uint32_t s_arrLead = 0;                // silence before it, the START marker's part of a bar
@@ -229,6 +247,7 @@ void request_view(uint32_t a, uint32_t b)
     if (!st || s_file.empty()) return;
     if (st->requestOverview(s_file, a, b, kCols)) {
         s_ovPending = true;
+        s_ovAskedAt = lv_tick_get();
         s_viewWanted = false;
     } else {
         s_viewWanted = true;           // a job is running; asked again from the timer
@@ -351,7 +370,11 @@ void show_info()
     } else {
         const uint32_t loop = s_end > s_start ? s_end - s_start : 0;
         const float bpm = crosspad::SliceMath::bpmOf(loop, s_rate, s_bars);
-        if (s_takeWithSong) {
+        if (s_block) {
+            std::snprintf(buf, sizeof(buf), "T%u block on bar %u | %s | marked %.2f s | ARR puts it back",
+                          (unsigned)(s_blockTrack + 1), (unsigned)(s_blockClip.bar + 1),
+                          base_of(s_file).c_str(), (double)loop / s_rate);
+        } else if (s_takeWithSong) {
             std::snprintf(buf, sizeof(buf), "%s  %.2f s | sung over the song from bar %u | marked %.2f s",
                           base_of(s_file).c_str(), (double)s_frames / s_rate, (unsigned)(s_takeFrom + 1),
                           (double)loop / s_rate);
@@ -362,6 +385,24 @@ void show_info()
         }
     }
     set_text(s_info, buf);
+}
+
+/// A take of minutes is seconds of card to draw: the picture says how far it
+/// is. A new take shows it at once, a redraw only if it is slow.
+void show_progress(crosspad::ISampleTools* st)
+{
+    if (!s_progress) return;
+    const bool waiting = s_ovPending || s_viewWanted;
+    if (!waiting || !(s_loading || lv_tick_elaps(s_ovAskedAt) >= kProgressMs)) {
+        if (!lv_obj_has_flag(s_progress, LV_OBJ_FLAG_HIDDEN)) lv_obj_add_flag(s_progress, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    const uint32_t pct = s_ovPending && st->job() == crosspad::ToolJob::Busy ? st->jobProgress() : 0;
+    if (lv_bar_get_value(s_progressBar) != (int32_t)pct) lv_bar_set_value(s_progressBar, (int32_t)pct, LV_ANIM_OFF);
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "Drawing the take ... %u%%", (unsigned)pct);
+    set_text(s_progressLabel, buf);
+    if (lv_obj_has_flag(s_progress, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(s_progress, LV_OBJ_FLAG_HIDDEN);
 }
 
 void show_marker_labels()
@@ -619,8 +660,9 @@ void input_cb(lv_event_t*)
     show_transport();
 }
 
-/// With SYNC, the song plays from FROM and the take starts with it; STOP
-/// stops both.
+/// With SYNC, the song plays from FROM and the take starts with it -- or,
+/// with the song already playing (the transport bar's PLAY), goes in at its
+/// next bar line; STOP stops both.
 void rec_cb(lv_event_t*)
 {
     auto* st = tools();
@@ -764,6 +806,8 @@ void entry_cb(lv_event_t* e)
     if (s_folder.isFolder(i)) { browse(path); return; }
     close_overlay();
     s_takeWithSong = false;            // a file off the card is not known to line up with anything
+    s_takeOrigin = 0;
+    s_block = false;
     load_file(path);
     show_info();
 }
@@ -934,6 +978,8 @@ void tick_cb(lv_timer_t*)
             s_rate = rs.sampleRate;
             s_takeWithSong = rs.withSong;
             s_takeFrom = rs.fromBar;
+            s_takeOrigin = 0;
+            s_block = false;
             load_file(rs.file);
         } else {
             char buf[80];
@@ -959,9 +1005,14 @@ void tick_cb(lv_timer_t*)
                         s_start = 0;
                         s_end = s_frames;
                         s_loading = false;
+                        if (s_block) {
+                            /* An Arrange block: on the part of the file it plays. */
+                            s_start = std::min(s_blockA, s_frames);
+                            s_end = s_blockB ? std::min(s_blockB, s_frames) : s_frames;
+                            if (s_end <= s_start) { s_start = 0; s_end = s_frames; }
                         /* The ends first, so a take with nothing to find keeps
                          * them even if the envelope is unreadable. */
-                        if (auto_trim_on() && apply_auto_trim()) {
+                        } else if (auto_trim_on() && apply_auto_trim()) {
                             set_text(s_info, "Auto trim: the markers are on the take.");
                         }
                         show_marker_labels();
@@ -993,6 +1044,7 @@ void tick_cb(lv_timer_t*)
             request_view(s_wantA, s_wantB);
         }
     }
+    show_progress(st);
 
     /* A loop on its way into the song. */
     if (s_importPending) {
@@ -1189,6 +1241,23 @@ void put_cb(lv_event_t*)
     auto* se = songs();
     if (!se) return;
     close_overlay();
+    /* An Arrange block put back on its track takes its own place: the old one
+     * goes first, or a START moved later would leave its head playing in
+     * front of the trimmed copy. Undo brings it back. */
+    if (s_block && s_arrTrack == s_blockTrack) {
+        {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            auto& cs = se->song().tracks[s_blockTrack].clips;
+            for (size_t i = 0; i < cs.size(); ++i) {
+                const auto& c = cs[i];
+                if (c.bar == s_blockClip.bar && c.file == s_blockClip.file && c.offset == s_blockClip.offset) {
+                    cs.erase(cs.begin() + (long)i);
+                    break;
+                }
+            }
+        }
+        se->commit();
+    }
     if (se->requestImport(s_file, s_start, s_end, s_arrTrack, s_arrBar, s_arrLead)) {
         s_importPending = true;
         set_text(s_info, "Putting it in the song ...");
@@ -1338,13 +1407,21 @@ void arr_cb(lv_event_t*)
     if (!s_frames || s_end <= s_start) { set_text(s_info, "Record a take, or pick one with FILES, first."); return; }
     const SongView v = song_view();
     if (!v.open) { set_text(s_info, "The song is not open yet -- is the card in?"); return; }
-    s_arrLead = s_takeWithSong && v.spBar ? s_start % v.spBar : 0;
+    /* Frame s_takeOrigin of the file sounds on bar s_takeFrom: START lands as
+     * many bars and frames from there -- before it, too, for a block whose
+     * START was moved earlier than the part it played. */
+    const int64_t spb = v.spBar ? (int64_t)v.spBar : 1;
+    const int64_t rel = (int64_t)s_start - (int64_t)s_takeOrigin;
+    const int64_t shift = rel >= 0 ? rel / spb : -((-rel + spb - 1) / spb);
+    s_arrLead = s_takeWithSong && v.spBar ? (uint32_t)(rel - shift * spb) : 0;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
         const crosspad::AudioSong& song = se->song();
         const int last = crosspad::AudioSong::kTracks - 1;
         if (s_takeWithSong) {
-            s_arrBar = s_takeFrom + (v.spBar ? s_start / v.spBar : 0);
+            const int64_t bar = (int64_t)s_takeFrom + shift;
+            s_arrBar = bar > 0 ? (uint32_t)bar : 0;
+            if (bar < 0) s_arrLead = 0;   // the song has nothing before its bar one
             const uint32_t to = s_arrBar + arr_bars(v);
             s_arrTrack = (uint8_t)last;
             for (int t = 0; t <= last; ++t) {
@@ -1429,6 +1506,39 @@ void arr_cb(lv_event_t*)
     show_arr();
 }
 
+/// CLIP EDIT on an Arrange audio track: the block of it on @p f's bar -- the
+/// one picked, or the one under the playhead -- here, its WAV with the
+/// markers on the part it plays, lined up with the song where it sits. No
+/// block there, and the screen records into the track as before.
+void open_block(const crosspad::ArrangeFocus& f)
+{
+    auto* se = songs();
+    if (!se) return;
+    std::string path;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        const crosspad::AudioSong& song = se->song();
+        const auto& cs = song.tracks[f.track].clips;
+        for (size_t i = 0; i < cs.size() && path.empty(); ++i) {
+            uint32_t end = cs[i].bar + cs[i].bars;
+            if (i + 1 < cs.size()) end = std::min(end, cs[i + 1].bar);
+            if (cs[i].file.empty() || f.bar < cs[i].bar || f.bar >= end) continue;
+            s_blockClip = cs[i];
+            path = song.clipPath(cs[i].file);
+        }
+    }
+    if (path.empty()) return;
+    s_block = true;
+    s_blockTrack = (uint8_t)f.track;
+    s_blockA = s_blockClip.offset;
+    s_blockB = s_blockClip.frames ? s_blockClip.offset + s_blockClip.frames : 0;
+    s_takeWithSong = true;
+    s_takeFrom = s_blockClip.bar;
+    s_takeOrigin = s_blockClip.offset;
+    s_from = s_blockClip.bar;
+    load_file(path);
+}
+
 } // namespace
 
 lv_obj_t* Recorder_create(lv_obj_t* parent, App* app)
@@ -1439,6 +1549,19 @@ lv_obj_t* Recorder_create(lv_obj_t* parent, App* app)
     if (indev_encoderTop) lv_indev_set_group(indev_encoderTop, s_encGroup);
 #endif
     s_container = parent;
+
+    /* Sent by Arrange to fill an audio track: the take is for that song, from
+     * where its playhead stood -- SYNC on, FROM there. */
+    {
+        const crosspad::ArrangeFocus& f = crosspad::arrangeFocus();
+        s_block = false;               // the last visit's block is not this one's
+        if (f.held() && !f.seq) {
+            s_sync = true;
+            s_from = f.bar;
+            s_fromTouched = true;
+            open_block(f);
+        }
+    }
 
     s_root = lv_obj_create(parent);
     lv_obj_set_size(s_root, LV_PCT(100), LV_PCT(100));
@@ -1495,6 +1618,30 @@ lv_obj_t* Recorder_create(lv_obj_t* parent, App* app)
     lv_obj_set_style_pad_all(s_wave, 3, 0);
     lv_obj_remove_flag(s_wave, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_wave, wave_draw_cb, LV_EVENT_DRAW_MAIN_END, nullptr);
+
+    s_progress = lv_obj_create(s_wave);
+    lv_obj_remove_style_all(s_progress);
+    lv_obj_set_size(s_progress, LV_PCT(70), LV_SIZE_CONTENT);
+    lv_obj_center(s_progress);
+    lv_obj_set_flex_flow(s_progress, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_progress, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(s_progress, 4, 0);
+    lv_obj_remove_flag(s_progress, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(s_progress, LV_OBJ_FLAG_CLICKABLE);
+    s_progressLabel = lv_label_create(s_progress);
+    lv_obj_set_style_text_font(s_progressLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_progressLabel, kText, 0);
+    lv_label_set_text(s_progressLabel, "");
+    s_progressBar = lv_bar_create(s_progress);
+    lv_obj_set_size(s_progressBar, LV_PCT(100), 6);
+    lv_bar_set_range(s_progressBar, 0, 100);
+    lv_obj_set_style_radius(s_progressBar, 3, 0);
+    lv_obj_set_style_radius(s_progressBar, 3, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_progressBar, kBg, 0);
+    lv_obj_set_style_bg_opa(s_progressBar, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_progressBar, kWave, LV_PART_INDICATOR);
+    lv_obj_set_style_anim_duration(s_progressBar, 0, 0);
+    lv_obj_add_flag(s_progress, LV_OBJ_FLAG_HIDDEN);
 
     s_info = lv_label_create(s_root);
     lv_obj_set_style_text_font(s_info, &lv_font_montserrat_10, 0);
@@ -1561,6 +1708,7 @@ void Recorder_destroy(lv_obj_t* root)
 #endif
     s_overlay = nullptr;
     s_root = s_wave = s_inBtn = s_recBtn = s_timeLabel = s_info = nullptr;
+    s_progress = s_progressBar = s_progressLabel = nullptr;
     s_meter[0] = s_meter[1] = nullptr;
     s_startBtn = s_endBtn = s_loopBtn = s_barsBtn = nullptr;
     s_syncBtn = s_preBtn = s_fromBtn = s_songLabel = s_trackBtn = s_barBtn = s_arrInfo = nullptr;
