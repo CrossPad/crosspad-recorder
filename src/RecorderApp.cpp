@@ -981,6 +981,10 @@ void tick_cb(lv_timer_t*)
             s_takeOrigin = 0;
             s_block = false;
             load_file(rs.file);
+        } else if (rs.error.empty()) {
+            /* Stopped without a fault and without a frame: the input gave
+             * nothing, which "failed" with no reason never said. */
+            set_text(s_info, "Nothing came in -- check the input.");
         } else {
             char buf[80];
             std::snprintf(buf, sizeof(buf), "The take failed: %s", rs.error.c_str());
@@ -1509,7 +1513,9 @@ void arr_cb(lv_event_t*)
 /// CLIP EDIT on an Arrange audio track: the block of it on @p f's bar -- the
 /// one picked, or the one under the playhead -- here, its WAV with the
 /// markers on the part it plays, lined up with the song where it sits. No
-/// block there, and the screen records into the track as before.
+/// block there -- a new track, an empty bar -- and the screen is empty,
+/// ready to record into the track: the last session's take stayed on it and
+/// ARR offered that one for the new track.
 void open_block(const crosspad::ArrangeFocus& f)
 {
     auto* se = songs();
@@ -1527,7 +1533,17 @@ void open_block(const crosspad::ArrangeFocus& f)
             path = song.clipPath(cs[i].file);
         }
     }
-    if (path.empty()) return;
+    if (path.empty()) {
+        if (auto* st = tools()) st->stopPreview();
+        s_file.clear();
+        s_frames = 0;
+        s_start = s_end = 0;
+        s_ov = crosspad::WaveOverview{};
+        s_loading = false;
+        s_takeWithSong = false;
+        s_takeFrom = s_takeOrigin = 0;
+        return;
+    }
     s_block = true;
     s_blockTrack = (uint8_t)f.track;
     s_blockA = s_blockClip.offset;
@@ -1725,7 +1741,7 @@ void Recorder_destroy(lv_obj_t* root)
     }
     s_prevEncGroup = nullptr;
 #endif
-    lv_obj_delete_async(root);
+    if (root) lv_obj_delete_async(root);
 }
 
 /* No padLogicName in the registration on purpose: the pads play the kit,
