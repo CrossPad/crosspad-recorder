@@ -981,6 +981,10 @@ void tick_cb(lv_timer_t*)
             s_takeOrigin = 0;
             s_block = false;
             load_file(rs.file);
+        } else if (rs.error.empty()) {
+            /* Stopped without a fault and without a frame: the input gave
+             * nothing, which "failed" with no reason never said. */
+            set_text(s_info, "Nothing came in -- check the input.");
         } else {
             char buf[80];
             std::snprintf(buf, sizeof(buf), "The take failed: %s", rs.error.c_str());
