@@ -80,6 +80,7 @@ constexpr uint32_t kTickMs     = 50;
 constexpr uint32_t kZoomFrames = 12000;   // each side of a marker in fine mode, ~0.25 s
 constexpr uint32_t kReloopMs   = 150;     // a marker still for this long restarts the loop
 constexpr uint32_t kProgressMs = 300;     // a redraw this slow gets a progress bar; a new take gets one at once
+constexpr float    kNormPeak   = 0.966f;  // NORM's loudest sample: -0.3 dB of full scale, as the Sampler's NORM
 
 const lv_color_t kBg     = lv_color_hex(0x16181B);
 const lv_color_t kPanel  = lv_color_hex(0x20242A);
@@ -143,6 +144,7 @@ bool     s_wasRecording = false;
 int32_t  s_headX = -1;                 // playhead column as drawn, -1 = none
 bool     s_listPending = false;
 bool     s_savePending = false;
+bool     s_normPending = false;
 float    s_level[2] = {};
 
 /* Where the markers land on a new take. Persisted, not kept in this file: a
@@ -741,6 +743,35 @@ void save_cb(lv_event_t*)
     }
 }
 
+/// Where NORM writes @p path's copy: beside it, "<name>_norm.wav".
+std::string normalized_path(const std::string& path)
+{
+    const size_t dot = path.rfind('.');
+    const size_t slash = path.rfind('/');
+    const std::string stem = dot != std::string::npos && (slash == std::string::npos || dot > slash)
+                                 ? path.substr(0, dot) : path;
+    return stem + "_norm.wav";
+}
+
+/// NORM: the take brought up to -0.3 dB of full scale, as a copy beside it
+/// -- the take itself is never written over. The copy is what is on screen
+/// afterwards, with the markers where they were: the length is the same.
+void norm_cb(lv_event_t*)
+{
+    auto* st = tools();
+    if (!st || !s_frames || s_normPending) return;
+    if (st->recStatus().recording) return;
+    st->stopPreview();
+    s_looping = false;
+    show_transport();
+    if (st->requestNormalized(s_file, normalized_path(s_file), kNormPeak)) {
+        s_normPending = true;
+        set_text(s_info, "Normalizing the take ...");
+    } else {
+        set_text(s_info, "The card is busy -- press NORM again.");
+    }
+}
+
 /// The loop to the Slicer: handed over, then the Slicer opened in this
 /// app's place -- on the next turn of the loop, since opening it destroys
 /// this screen and its callback with it.
@@ -1044,9 +1075,32 @@ void tick_cb(lv_timer_t*)
             std::snprintf(buf, sizeof(buf), job == crosspad::ToolJob::Ready ? "Saved the loop as %s" : "Not saved: %s",
                           base_of(st->jobResult()).c_str());
             set_text(s_info, buf);
+        } else if (s_normPending) {
+            s_normPending = false;
+            const std::string result = st->jobResult();
+            char buf[96];
+            if (job != crosspad::ToolJob::Ready) {
+                std::snprintf(buf, sizeof(buf), "Not normalized: %s", result.c_str());
+            } else if (result == s_file) {
+                /* Within 0.1 dB of the peak already: nothing was written. */
+                std::snprintf(buf, sizeof(buf), "Already at -0.3 dB -- nothing to raise.");
+            } else {
+                /* The copy in the take's place, the markers kept: it is the
+                 * same length, and a picture of it shows the new level. */
+                s_file = result;
+                s_ov = crosspad::WaveOverview{};
+                request_view(0, 0);
+                if (s_wave) lv_obj_invalidate(s_wave);
+                std::snprintf(buf, sizeof(buf), "Normalized to -0.3 dB: %s", base_of(result).c_str());
+            }
+            set_text(s_info, buf);
         } else if (s_viewWanted) {
             request_view(s_wantA, s_wantB);
         }
+    } else if (s_normPending) {
+        char buf[40];
+        std::snprintf(buf, sizeof(buf), "Normalizing the take ... %u%%", (unsigned)st->jobProgress());
+        set_text(s_info, buf);
     }
     show_progress(st);
 
@@ -1671,10 +1725,11 @@ lv_obj_t* Recorder_create(lv_obj_t* parent, App* app)
     s_startBtn = make_marker(tools_row, "START", true);
     s_endBtn = make_marker(tools_row, "END", false);
     make_button(tools_row, 28, LV_SYMBOL_PLAY, play_cb);
-    s_loopBtn = make_button(tools_row, 44, LV_SYMBOL_LOOP, loop_cb);
-    s_barsBtn = make_button(tools_row, 32, "1b", bars_cb);
-    make_button(tools_row, 44, LV_SYMBOL_SAVE " SAVE", save_cb);
-    make_button(tools_row, 50, "SLICE " LV_SYMBOL_RIGHT, slice_cb);
+    s_loopBtn = make_button(tools_row, 28, LV_SYMBOL_LOOP, loop_cb);
+    s_barsBtn = make_button(tools_row, 28, "1b", bars_cb);
+    make_button(tools_row, 34, "SAVE", save_cb);
+    make_button(tools_row, 33, "NORM", norm_cb);
+    make_button(tools_row, 46, "SLICE " LV_SYMBOL_RIGHT, slice_cb);
 
     auto* st = tools();
     if (st) st->selectInput(st->input());   // the meter runs from the start
@@ -1729,7 +1784,7 @@ void Recorder_destroy(lv_obj_t* root)
     s_startBtn = s_endBtn = s_loopBtn = s_barsBtn = nullptr;
     s_syncBtn = s_preBtn = s_fromBtn = s_songLabel = s_trackBtn = s_barBtn = s_arrInfo = nullptr;
     s_setInfo = nullptr;
-    s_looping = s_reloop = s_ovPending = s_viewWanted = s_listPending = s_savePending = s_importPending = false;
+    s_looping = s_reloop = s_ovPending = s_viewWanted = s_listPending = s_savePending = s_normPending = s_importPending = false;
     s_editStart = s_editEnd = Edit::None;
     s_headX = -1;
 
