@@ -18,6 +18,8 @@
  *          CLIP EDIT on an Arrange audio block opens that block here: its
  *          WAV, the markers on the part of it the block plays; trimmed and
  *          put back, it takes the block's place, every frame where it was.
+ *          NORM on such a block lands on its track at once: the block plays
+ *          the normalized copy from then on.
  *   meter  left and right peaks of the input, always on
  *   wave   the take: the loop between the START and END markers lit, the
  *          rest dimmed, and the playhead while it is auditioned
@@ -753,9 +755,35 @@ std::string normalized_path(const std::string& path)
     return stem + "_norm.wav";
 }
 
+/// An Arrange block opened here plays @p path from now on: what is done to
+/// it here -- NORM -- lands on its track at once, not only on this screen.
+/// The copy is beside the block's file, so in the song's clips, and the same
+/// length: the block keeps its bar and the part of the file it plays. A
+/// commit, so Arrange's undo brings the old file back.
+bool block_takes_file(const std::string& path)
+{
+    auto* se = songs();
+    if (!se) return false;
+    bool found = false;
+    {
+        std::lock_guard<std::recursive_mutex> l(se->songMutex());
+        for (auto& c : se->song().tracks[s_blockTrack].clips) {
+            if (c.bar == s_blockClip.bar && c.file == s_blockClip.file && c.offset == s_blockClip.offset) {
+                c.file = base_of(path);
+                s_blockClip = c;
+                found = true;
+                break;
+            }
+        }
+    }
+    if (found) se->commit();
+    return found;
+}
+
 /// NORM: the take brought up to -0.3 dB of full scale, as a copy beside it
 /// -- the take itself is never written over. The copy is what is on screen
-/// afterwards, with the markers where they were: the length is the same.
+/// afterwards, with the markers where they were: the length is the same --
+/// and, for a block Arrange opened here, what its track plays.
 void norm_cb(lv_event_t*)
 {
     auto* st = tools();
@@ -1091,7 +1119,12 @@ void tick_cb(lv_timer_t*)
                 s_ov = crosspad::WaveOverview{};
                 request_view(0, 0);
                 if (s_wave) lv_obj_invalidate(s_wave);
-                std::snprintf(buf, sizeof(buf), "Normalized to -0.3 dB: %s", base_of(result).c_str());
+                if (s_block && block_takes_file(result)) {
+                    std::snprintf(buf, sizeof(buf), "Normalized to -0.3 dB -- track %u plays it now.",
+                                  (unsigned)(s_blockTrack + 1));
+                } else {
+                    std::snprintf(buf, sizeof(buf), "Normalized to -0.3 dB: %s", base_of(result).c_str());
+                }
             }
             set_text(s_info, buf);
         } else if (s_viewWanted) {

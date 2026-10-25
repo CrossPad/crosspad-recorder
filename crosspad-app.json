@@ -1,7 +1,7 @@
 {
   "name": "Recorder",
   "id": "recorder",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Record a sample from the mics, the line-in or the pads, and trim it to a loop",
   "category": "audio",
   "icon": "recorder.png",
@@ -15,6 +15,7 @@
     "crosspad-gui": ">=1.28.0,<3.0.0"
   },
   "changelog": [
+    "0.7.0: NORM on an Arrange block (CLIP EDIT) lands on its track at once -- the block plays the normalized copy from then on, same bar and same part of the file, one commit Arrange's undo takes back; before, only the Recorder's screen had it until ARR and PUT.",
     "0.6.0: NORM -- the take brought up to -0.3 dB of full scale, as a copy beside it (<name>_norm.wav) that is then on screen with the markers where they were; the take itself is never written over, and one already at the peak is left as it is. LOOP and 1b are as narrow as PLAY, SAVE is a word, to make room",
     "0.5.2: a new track or an empty bar from Arrange opens an empty Recorder: the last session's take stayed on screen and ARR offered it for the new track.",
     "0.5.1: builds on core 1.70+/gui 1.28+ and on core/gui 2.x (>=1.70.0,<3.0.0 and >=1.28.0,<3.0.0) for the merge window; a root deleted before the app's teardown is handled (gui 2.0 calls destroy with none)",
