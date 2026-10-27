@@ -775,6 +775,19 @@ std::string normalized_path(const std::string& path)
     return stem + "_norm.wav";
 }
 
+/// Where a copy made of the take on screen goes, @p beside being the place
+/// next to it. An Arrange block's copy goes in the song's clips folder
+/// itself: the block's file may be in one the song keeps for itself -- a
+/// bounced track plays its renders from clips/.freeze, which the next freeze
+/// clears of what it did not make -- and a block names its file from clips/.
+std::string copy_path(const std::string& beside)
+{
+    auto* se = songs();
+    if (!s_block || !se) return beside;
+    std::lock_guard<std::recursive_mutex> l(se->songMutex());
+    return se->song().clipPath(base_of(beside));
+}
+
 /// An Arrange block opened here plays @p path from now on: what is done to
 /// it here -- NORM, FX -- lands on its track at once, not only on this
 /// screen. The copy is beside the block's file, so in the song's clips. One
@@ -830,7 +843,7 @@ void norm_cb(lv_event_t*)
     st->stopPreview();
     s_looping = false;
     show_transport();
-    if (st->requestNormalized(s_file, normalized_path(s_file), kNormPeak)) {
+    if (st->requestNormalized(s_file, copy_path(normalized_path(s_file)), kNormPeak)) {
         s_normPending = true;
         set_text(s_info, "Normalizing the take ...");
     } else {
@@ -1648,7 +1661,7 @@ void fx_apply_cb(lv_event_t*)
     s_looping = false;
     crosspad::SampleFx fx = s_fx;
     if (!fx.semitones) fx.keepLength = false;      // the file's name and the render agree on what was done
-    if (!st->requestRendered(s_file, fx_path(s_file, fx), fx)) {
+    if (!st->requestRendered(s_file, copy_path(fx_path(s_file, fx)), fx)) {
         set_text(s_fxInfo, "The card is busy -- press APPLY again.");
         return;
     }
