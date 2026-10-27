@@ -19,7 +19,10 @@
  *          WAV, the markers on the part of it the block plays; trimmed and
  *          put back, it takes the block's place, every frame where it was.
  *          NORM on such a block lands on its track at once: the block plays
- *          the normalized copy from then on.
+ *          the normalized copy from then on. FX opens the effects window:
+ *          PITCH (KEEP the length, or TAPE: varispeed), LOW and HIGH PASS,
+ *          LISTEN, APPLY -- a copy of the take rendered with them, beside
+ *          it, which a block then plays as it does NORM's.
  *   meter  left and right peaks of the input, always on
  *   wave   the take: the loop between the START and END markers lit, the
  *          rest dimmed, and the playhead while it is auditioned
@@ -147,7 +150,24 @@ int32_t  s_headX = -1;                 // playhead column as drawn, -1 = none
 bool     s_listPending = false;
 bool     s_savePending = false;
 bool     s_normPending = false;
+bool     s_fxPending = false;
 float    s_level[2] = {};
+
+/* FX: what the next APPLY renders into a copy of the take, and what the last
+ * one rendered (TAPE moves the markers by its ratio). Neutral again after an
+ * APPLY -- the copy has it, and a second APPLY would put it on twice. The
+ * cutoffs are steps of kFxCutoffs: LOW PASS off past the top, HIGH PASS off
+ * below the bottom. */
+crosspad::SampleFx s_fx;
+crosspad::SampleFx s_fxApplied;
+int      s_lpStep = crosspad::kFxCutoffCount;
+int      s_hpStep = -1;
+lv_obj_t* s_fxPitchBtn = nullptr;      // in the FX window
+lv_obj_t* s_fxModeBtn = nullptr;
+lv_obj_t* s_fxLpBtn = nullptr;
+lv_obj_t* s_fxHpBtn = nullptr;
+lv_obj_t* s_fxNote = nullptr;
+lv_obj_t* s_fxInfo = nullptr;
 
 /* Where the markers land on a new take. Persisted, not kept in this file: a
  * player ticks it once and expects every take after it to arrive trimmed, a
@@ -756,29 +776,47 @@ std::string normalized_path(const std::string& path)
 }
 
 /// An Arrange block opened here plays @p path from now on: what is done to
-/// it here -- NORM -- lands on its track at once, not only on this screen.
-/// The copy is beside the block's file, so in the song's clips, and the same
-/// length: the block keeps its bar and the part of the file it plays. A
-/// commit, so Arrange's undo brings the old file back.
-bool block_takes_file(const std::string& path)
+/// it here -- NORM, FX -- lands on its track at once, not only on this
+/// screen. The copy is beside the block's file, so in the song's clips. One
+/// as long as the file keeps the block's bar and the part of the file it
+/// plays; one played at @p ratio (FX's TAPE: @p ratio file frames a frame of
+/// the copy) has that part at the same ratio, and the block as many bars as
+/// it now lasts, up to the next block. A commit, so Arrange's undo brings the
+/// old file back.
+bool block_takes_file(const std::string& path, double ratio = 1.0)
 {
     auto* se = songs();
     if (!se) return false;
     bool found = false;
     {
         std::lock_guard<std::recursive_mutex> l(se->songMutex());
-        for (auto& c : se->song().tracks[s_blockTrack].clips) {
-            if (c.bar == s_blockClip.bar && c.file == s_blockClip.file && c.offset == s_blockClip.offset) {
-                c.file = base_of(path);
-                s_blockClip = c;
-                found = true;
-                break;
+        crosspad::AudioSong& song = se->song();
+        auto& cs = song.tracks[s_blockTrack].clips;
+        for (size_t i = 0; i < cs.size(); ++i) {
+            auto& c = cs[i];
+            if (c.bar != s_blockClip.bar || c.file != s_blockClip.file || c.offset != s_blockClip.offset) continue;
+            c.file = base_of(path);
+            if (ratio != 1.0) {
+                c.offset = (uint32_t)((double)c.offset / ratio);
+                if (c.frames) c.frames = crosspad::SliceMath::pitchedFrames(c.frames, ratio);
+                const uint32_t plays = c.frames ? c.frames : (s_frames > c.offset ? s_frames - c.offset : 0);
+                const uint32_t spBar = song.samplesPerBar(s_rate);
+                uint32_t bars = spBar ? std::max<uint32_t>(1, (plays + spBar - 1) / spBar) : c.bars;
+                for (const auto& n : cs) {
+                    if (n.bar > c.bar) bars = std::min(bars, n.bar - c.bar);
+                }
+                c.bars = (uint16_t)std::min<uint32_t>(bars, UINT16_MAX);
             }
+            s_blockClip = c;
+            found = true;
+            break;
         }
     }
     if (found) se->commit();
     return found;
 }
+
+void fx_done(bool ok, const std::string& result);
 
 /// NORM: the take brought up to -0.3 dB of full scale, as a copy beside it
 /// -- the take itself is never written over. The copy is what is on screen
@@ -832,6 +870,7 @@ void close_overlay()
     lv_obj_delete_async(s_overlay);
     s_overlay = nullptr;
     s_trackBtn = s_barBtn = s_arrInfo = s_setInfo = nullptr;
+    s_fxPitchBtn = s_fxModeBtn = s_fxLpBtn = s_fxHpBtn = s_fxNote = s_fxInfo = nullptr;
 }
 
 /* The card, a folder at a time: FILES opens the recordings, or the folder
@@ -1127,12 +1166,19 @@ void tick_cb(lv_timer_t*)
                 }
             }
             set_text(s_info, buf);
+        } else if (s_fxPending) {
+            s_fxPending = false;
+            fx_done(job == crosspad::ToolJob::Ready, st->jobResult());
         } else if (s_viewWanted) {
             request_view(s_wantA, s_wantB);
         }
     } else if (s_normPending) {
         char buf[40];
         std::snprintf(buf, sizeof(buf), "Normalizing the take ... %u%%", (unsigned)st->jobProgress());
+        set_text(s_info, buf);
+    } else if (s_fxPending) {
+        char buf[40];
+        std::snprintf(buf, sizeof(buf), "Applying the FX ... %u%%", (unsigned)st->jobProgress());
         set_text(s_info, buf);
     }
     show_progress(st);
@@ -1485,6 +1531,245 @@ void settings_cb(lv_event_t*)
     show_settings();
 }
 
+// ── FX ─────────────────────────────────────────────────────────────────────
+
+/// Neutral, the length kept: a clip on a song's bars is what FX is for.
+void fx_reset()
+{
+    s_fx = crosspad::SampleFx{};
+    s_fx.keepLength = true;
+    s_lpStep = crosspad::kFxCutoffCount;
+    s_hpStep = -1;
+}
+
+/// Where APPLY writes @p path's copy: beside it, what was set in its name --
+/// "<name>_p+3k_h125_l8000.wav", "k" for the length kept.
+std::string fx_path(const std::string& path, const crosspad::SampleFx& fx)
+{
+    const size_t dot = path.rfind('.');
+    const size_t slash = path.rfind('/');
+    std::string out = dot != std::string::npos && (slash == std::string::npos || dot > slash) ? path.substr(0, dot) : path;
+    char buf[16];
+    if (fx.semitones) {
+        std::snprintf(buf, sizeof(buf), "_p%+d%s", fx.semitones, fx.keepLength ? "k" : "");
+        out += buf;
+    }
+    if (fx.hpHz) { std::snprintf(buf, sizeof(buf), "_h%u", (unsigned)fx.hpHz); out += buf; }
+    if (fx.lpHz) { std::snprintf(buf, sizeof(buf), "_l%u", (unsigned)fx.lpHz); out += buf; }
+    return out + ".wav";
+}
+
+void cutoff_text(char* buf, size_t n, const char* name, uint16_t hz)
+{
+    if (!hz)            std::snprintf(buf, n, "%s off", name);
+    else if (hz < 1000) std::snprintf(buf, n, "%s %u Hz", name, (unsigned)hz);
+    else                std::snprintf(buf, n, "%s %.1f kHz", name, (double)hz / 1000.0);
+}
+
+void show_fx()
+{
+    if (!s_fxPitchBtn) return;
+    char buf[32];
+    if (s_fx.semitones) std::snprintf(buf, sizeof(buf), "PITCH %+d st", s_fx.semitones);
+    else                std::snprintf(buf, sizeof(buf), "PITCH 0");
+    set_text(lv_obj_get_child(s_fxPitchBtn, 0), buf);
+    set_text(lv_obj_get_child(s_fxModeBtn, 0), s_fx.keepLength ? "KEEP LENGTH" : "TAPE");
+    cutoff_text(buf, sizeof(buf), "LOW PASS", s_fx.lpHz);
+    set_text(lv_obj_get_child(s_fxLpBtn, 0), buf);
+    cutoff_text(buf, sizeof(buf), "HIGH PASS", s_fx.hpHz);
+    set_text(lv_obj_get_child(s_fxHpBtn, 0), buf);
+    set_text(s_fxNote, s_fx.keepLength
+                           ? "KEEP: the pitch moves, the length and the bars stay."
+                           : "TAPE: higher is shorter, lower is longer, as a turntable.");
+}
+
+void fx_pitch_cb(lv_event_t* e)
+{
+    const int step = number_step(e);
+    if (!step) return;
+    s_fx.semitones = std::max(-crosspad::SliceMath::kMaxSemitones,
+                              std::min(crosspad::SliceMath::kMaxSemitones, s_fx.semitones + step));
+    show_fx();
+}
+
+void fx_mode_cb(lv_event_t*)
+{
+    s_fx.keepLength = !s_fx.keepLength;
+    show_fx();
+}
+
+void fx_lp_cb(lv_event_t* e)
+{
+    const int step = number_step(e);
+    if (!step) return;
+    s_lpStep = std::max(0, std::min(crosspad::kFxCutoffCount, s_lpStep + step));
+    s_fx.lpHz = s_lpStep < crosspad::kFxCutoffCount ? crosspad::kFxCutoffs[s_lpStep] : 0;
+    show_fx();
+}
+
+void fx_hp_cb(lv_event_t* e)
+{
+    const int step = number_step(e);
+    if (!step) return;
+    s_hpStep = std::max(-1, std::min(crosspad::kFxCutoffCount - 1, s_hpStep + step));
+    s_fx.hpHz = s_hpStep >= 0 ? crosspad::kFxCutoffs[s_hpStep] : 0;
+    show_fx();
+}
+
+/// The marked loop once, through the filters and the pitch as they are set.
+/// The audition can only play a pitch as TAPE does; KEEP is heard right after
+/// APPLY.
+void fx_listen_cb(lv_event_t*)
+{
+    auto* st = tools();
+    if (!st || s_end <= s_start) return;
+    st->stopPreview();
+    s_looping = false;
+    crosspad::PreviewSound snd;
+    snd.semitones = (int8_t)s_fx.semitones;
+    snd.hpHz = s_fx.hpHz;
+    snd.lpHz = s_fx.lpHz;
+    const bool ok = st->previewAs(s_file, s_start, s_end, false, snd);
+    set_text(s_fxInfo, !ok ? "Cannot play now."
+                           : (s_fx.semitones && s_fx.keepLength ? "Playing -- the pitch as TAPE; APPLY keeps the length."
+                                                                : "Playing the marked loop."));
+    show_transport();
+}
+
+/// A copy of the whole take rendered with the FX, beside it -- the take is
+/// never written over -- then on screen in its place, and on its track for a
+/// block Arrange opened here.
+void fx_apply_cb(lv_event_t*)
+{
+    auto* st = tools();
+    if (!st || !s_frames || s_fxPending) return;
+    if (!s_fx.any()) { set_text(s_fxInfo, "Nothing set -- turn PITCH or a filter first."); return; }
+    st->stopPreview();
+    s_looping = false;
+    crosspad::SampleFx fx = s_fx;
+    if (!fx.semitones) fx.keepLength = false;      // the file's name and the render agree on what was done
+    if (!st->requestRendered(s_file, fx_path(s_file, fx), fx)) {
+        set_text(s_fxInfo, "The card is busy -- press APPLY again.");
+        return;
+    }
+    s_fxApplied = fx;
+    s_fxPending = true;
+    close_overlay();
+    set_text(s_info, "Applying the FX ...");
+    show_transport();
+}
+
+/// What APPLY came to, from the tick: the copy on screen, the markers on the
+/// same sound -- moved by TAPE's ratio, as the copy is -- and the FX back to
+/// neutral.
+void fx_done(bool ok, const std::string& result)
+{
+    char buf[112];
+    if (!ok) {
+        std::snprintf(buf, sizeof(buf), "FX not applied: %s", result.c_str());
+        set_text(s_info, buf);
+        return;
+    }
+    const double ratio = s_fxApplied.semitones && !s_fxApplied.keepLength
+                             ? crosspad::SliceMath::pitchRatio(s_fxApplied.semitones) : 1.0;
+    if (ratio != 1.0) {
+        s_start = (uint32_t)((double)s_start / ratio);
+        s_end = (uint32_t)((double)s_end / ratio);
+        s_takeOrigin = (uint32_t)((double)s_takeOrigin / ratio);
+        s_frames = crosspad::SliceMath::pitchedFrames(s_frames, ratio);
+    }
+    s_file = result;
+    s_ov = crosspad::WaveOverview{};
+    request_view(0, 0);
+    if (s_wave) lv_obj_invalidate(s_wave);
+    if (s_block && block_takes_file(result, ratio)) {
+        std::snprintf(buf, sizeof(buf), "FX on -- track %u plays it now.", (unsigned)(s_blockTrack + 1));
+    } else {
+        std::snprintf(buf, sizeof(buf), "FX on: %s", base_of(result).c_str());
+    }
+    set_text(s_info, buf);
+    fx_reset();
+}
+
+/// A button for the FX window: in its group, not the screen's.
+lv_obj_t* fx_button(lv_obj_t* row, int32_t w, const char* text, lv_event_cb_t cb, lv_group_t* g)
+{
+    lv_obj_t* b = make_button(row, w, text, cb, nullptr);
+    lv_obj_set_height(b, 30);
+#ifdef REC_USE_ENCODER
+    lv_group_remove_obj(b);
+    if (g) lv_group_add_obj(g, b);
+#else
+    (void)g;
+#endif
+    return b;
+}
+
+/// The effects, a window over the take: the first two, pitch and the
+/// filters, and a row each for the ones to come.
+void fx_cb(lv_event_t*)
+{
+    auto* st = tools();
+    if (!st || s_overlay || st->recStatus().recording) return;
+    if (!s_frames || s_end <= s_start) { set_text(s_info, "Record a take, or pick one with FILES, first."); return; }
+    if (s_fxPending) return;
+
+    s_overlay = lv_obj_create(s_root);
+    lv_obj_remove_style_all(s_overlay);
+    lv_obj_set_size(s_overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_add_flag(s_overlay, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_style_bg_color(s_overlay, kBg, 0);
+    lv_obj_set_style_bg_opa(s_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(s_overlay, 6, 0);
+    lv_obj_set_style_pad_row(s_overlay, 5, 0);
+    lv_obj_set_flex_flow(s_overlay, LV_FLEX_FLOW_COLUMN);
+    lv_obj_remove_flag(s_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_group_t* g = nullptr;
+#ifdef REC_USE_ENCODER
+    s_overlayGroup = lv_group_create();
+    if (indev_encoderTop) lv_indev_set_group(indev_encoderTop, s_overlayGroup);
+    g = s_overlayGroup;
+#endif
+    lv_obj_t* t = lv_label_create(s_overlay);
+    lv_obj_set_style_text_color(t, kText, 0);
+    lv_obj_set_size(t, LV_PCT(100), 16);
+    lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
+    const std::string title = "FX  " + base_of(s_file);
+    lv_label_set_text(t, title.c_str());
+
+    lv_obj_t* r1 = overlay_row();
+    s_fxPitchBtn = make_number(r1, 148, 30, fx_pitch_cb, g);
+    s_fxModeBtn = fx_button(r1, 148, "", fx_mode_cb, g);
+    lv_obj_t* r2 = overlay_row();
+    s_fxLpBtn = make_number(r2, 148, 30, fx_lp_cb, g);
+    s_fxHpBtn = make_number(r2, 148, 30, fx_hp_cb, g);
+
+    s_fxNote = lv_label_create(s_overlay);
+    lv_obj_set_style_text_font(s_fxNote, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_fxNote, kDim, 0);
+    lv_obj_set_width(s_fxNote, LV_PCT(100));
+    lv_label_set_long_mode(s_fxNote, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_fxNote, "");
+
+    s_fxInfo = lv_label_create(s_overlay);
+    lv_obj_set_style_text_font(s_fxInfo, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_fxInfo, kText, 0);
+    lv_obj_set_size(s_fxInfo, LV_PCT(100), 12);
+    lv_label_set_long_mode(s_fxInfo, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_fxInfo, s_block ? "APPLY: a copy, and the block plays it." : "APPLY: a copy beside the take.");
+
+    lv_obj_t* act = overlay_row();
+    fx_button(act, 96, LV_SYMBOL_PLAY " LISTEN", fx_listen_cb, g);
+    lv_obj_t* apply = fx_button(act, 96, LV_SYMBOL_OK " APPLY", fx_apply_cb, g);
+    lv_obj_set_style_bg_color(apply, kAccent, 0);
+    lv_obj_set_style_text_color(apply, kInk, 0);
+    fx_button(act, 96, LV_SYMBOL_CLOSE " CLOSE", [](lv_event_t*) { close_overlay(); }, g);
+#ifdef REC_USE_ENCODER
+    if (g) lv_group_focus_obj(s_fxPitchBtn);
+#endif
+    show_fx();
+}
+
 /// The marked loop into the song: a synced take goes where it was sung --
 /// the bar under START, the rest of that bar before START kept as silence
 /// -- on the first track with room there; any other take after the last
@@ -1652,6 +1937,7 @@ lv_obj_t* Recorder_create(lv_obj_t* parent, App* app)
     if (indev_encoderTop) lv_indev_set_group(indev_encoderTop, s_encGroup);
 #endif
     s_container = parent;
+    if (!s_fx.any()) fx_reset();
 
     /* Sent by Arrange to fill an audio track: the take is for that song, from
      * where its playhead stood -- SYNC on, FROM there. */
@@ -1698,6 +1984,7 @@ lv_obj_t* Recorder_create(lv_obj_t* parent, App* app)
     encGroup = s_encGroup;
 #endif
     s_fromBtn = make_number(songRow, 54, 22, from_cb, encGroup);
+    make_button(songRow, 30, "FX", fx_cb);
     s_songLabel = lv_label_create(songRow);
     lv_obj_set_flex_grow(s_songLabel, 1);
     lv_obj_set_style_text_font(s_songLabel, &lv_font_montserrat_10, 0);
@@ -1817,7 +2104,9 @@ void Recorder_destroy(lv_obj_t* root)
     s_startBtn = s_endBtn = s_loopBtn = s_barsBtn = nullptr;
     s_syncBtn = s_preBtn = s_fromBtn = s_songLabel = s_trackBtn = s_barBtn = s_arrInfo = nullptr;
     s_setInfo = nullptr;
+    s_fxPitchBtn = s_fxModeBtn = s_fxLpBtn = s_fxHpBtn = s_fxNote = s_fxInfo = nullptr;
     s_looping = s_reloop = s_ovPending = s_viewWanted = s_listPending = s_savePending = s_normPending = s_importPending = false;
+    s_fxPending = false;
     s_editStart = s_editEnd = Edit::None;
     s_headX = -1;
 
