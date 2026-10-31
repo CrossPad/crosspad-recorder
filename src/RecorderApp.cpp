@@ -3,8 +3,9 @@
  * @brief Recorder -- a take from the mics, the line-in or the pads, trimmed
  *        front and back to a loop.
  *
- *   top    back, the input (MIC / LINE / PADS / USB -- what the computer
- *          plays over USB audio; a click cycles), REC/STOP,
+ *   top    back, the input (the two the Mixer's PAIR connects -- MIC, LINE
+ *          1/2 or LINE 3/4 --, PADS, USB -- what the computer plays over USB
+ *          audio --, PITCH; a click cycles), REC/STOP,
  *          the take's time, FILES (any WAV on the card, a folder at a time)
  *   song   SYNC: REC plays the open song from bar FROM and the take lines up
  *          with it -- its frame 0 is that bar, the codecs' delay taken off --
@@ -47,6 +48,7 @@
 #endif
 
 #include "crosspad/app/AppRegistrar.hpp"
+#include "crosspad/audio/IInputPairs.hpp"
 #include "crosspad/instrument/IInstrumentHost.hpp"
 #include "crosspad/instrument/InstrumentPadLogic.hpp"
 #include "crosspad/instrument/InstrumentPlayState.hpp"
@@ -65,6 +67,7 @@
 #include "lvgl.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -442,6 +445,26 @@ void show_marker_labels()
     label(s_endBtn, "END", s_editEnd);
 }
 
+/// What a take records, as the button says it: the two converters by the
+/// input the Mixer's PAIR puts on each ("MIC", "LINE 1/2", "LINE 3/4").
+const char* input_label(crosspad::RecInput in)
+{
+    static const char* const kInputs[] = {"MIC", "LINE", "PADS", "USB", "PITCH"};
+    if (in == crosspad::RecInput::Mic || in == crosspad::RecInput::Line) {
+        auto* p = crosspad::getPlatformServices().inputPairs;
+        const char* name = p ? p->inputOn(in == crosspad::RecInput::Mic ? 0 : 1) : nullptr;
+        if (name) {
+            static char buf[2][12];
+            char* b = buf[in == crosspad::RecInput::Mic ? 0 : 1];
+            size_t i = 0;
+            for (; name[i] && i + 1 < sizeof(buf[0]); ++i) b[i] = (char)std::toupper((unsigned char)name[i]);
+            b[i] = 0;
+            return b;
+        }
+    }
+    return kInputs[(int)in];
+}
+
 void show_transport()
 {
     auto* st = tools();
@@ -449,8 +472,7 @@ void show_transport()
     const crosspad::RecStatus rs = st->recStatus();
     set_text(lv_obj_get_child(s_recBtn, 0), rs.recording ? LV_SYMBOL_STOP " STOP" : "REC");
     set_bg(s_recBtn, rs.recording ? kRec : kPanel);
-    static const char* kInputs[] = {"MIC", "LINE", "PADS", "USB", "PITCH"};
-    set_text(lv_obj_get_child(s_inBtn, 0), kInputs[(int)st->input()]);
+    set_text(lv_obj_get_child(s_inBtn, 0), input_label(st->input()));
     set_bg(s_loopBtn, s_looping ? kAccent : kPanel);
     lv_obj_set_style_text_color(lv_obj_get_child(s_loopBtn, 0), s_looping ? kInk : kText, 0);
     char buf[16];
@@ -1045,6 +1067,8 @@ void tick_cb(lv_timer_t*)
 
     auto* st = tools();
     if (!st) return;
+    /* The Mixer's PAIR can change what the converters hear meanwhile. */
+    if (s_inBtn) set_text(lv_obj_get_child(s_inBtn, 0), input_label(st->input()));
 
     /* Meter: peaks, falling back slowly, as a desk's do. */
     float pk[2];
