@@ -143,6 +143,7 @@ uint32_t s_ovAskedAt = 0;
 bool     s_viewWanted = false;         // a picture asked for while a job ran
 uint32_t s_wantA = 0, s_wantB = 0;
 bool     s_loading = false;            // markers go to the ends when the picture comes
+std::string s_loadError;               // why the take could not be read (16-bit PCM WAV only)
 Edit     s_editStart = Edit::None, s_editEnd = Edit::None;
 uint8_t  s_bars = 1;
 bool     s_looping = false;
@@ -293,6 +294,7 @@ void load_file(const std::string& path)
     s_start = s_end = 0;
     s_ov = crosspad::WaveOverview{};
     s_loading = true;
+    s_loadError.clear();
     s_editStart = s_editEnd = Edit::None;
     request_view(0, 0);
     if (s_wave) lv_obj_invalidate(s_wave);
@@ -392,6 +394,10 @@ void show_info()
     char buf[112];
     if (s_file.empty()) {
         std::snprintf(buf, sizeof(buf), "Pick an input and press REC -- or FILES for a take on the card.");
+    } else if (!s_loadError.empty()) {
+        const bool unreadable = s_loadError.rfind("cannot read", 0) == 0;
+        std::snprintf(buf, sizeof(buf), "Not opened: %s%s", s_loadError.c_str(),
+                      unreadable ? " -- only 16-bit WAV files open here." : "");
     } else if (!s_frames) {
         std::snprintf(buf, sizeof(buf), "%s  reading ...", base_of(s_file).c_str());
     } else {
@@ -1134,6 +1140,7 @@ void tick_cb(lv_timer_t*)
     if (job != crosspad::ToolJob::Busy) {
         if (s_ovPending) {
             s_ovPending = false;
+            std::string note;                  // said over show_info()'s line
             if (job == crosspad::ToolJob::Ready) {
                 crosspad::WaveOverview ov = st->overview();
                 if (ov.file == s_file) {
@@ -1157,10 +1164,17 @@ void tick_cb(lv_timer_t*)
                         show_marker_labels();
                     }
                 }
+            } else if (s_loading || !s_frames) {
+                /* The take itself is unreadable (24-bit, float, not a WAV):
+                 * the line keeps saying why instead of "reading ..." for ever. */
+                s_loading = false;
+                s_loadError = st->jobResult();
+                if (s_loadError.empty()) s_loadError = "cannot read " + base_of(s_file);
             } else {
-                set_text(s_info, st->jobResult().c_str());
+                note = st->jobResult();        // a zoom or redraw: the take stays
             }
             show_info();
+            if (!note.empty()) set_text(s_info, note.c_str());
             if (s_wave) lv_obj_invalidate(s_wave);
         } else if (s_listPending) {
             s_listPending = false;
@@ -1949,6 +1963,7 @@ void open_block(const crosspad::ArrangeFocus& f)
         s_start = s_end = 0;
         s_ov = crosspad::WaveOverview{};
         s_loading = false;
+        s_loadError.clear();
         s_takeWithSong = false;
         s_takeFrom = s_takeOrigin = 0;
         return;
