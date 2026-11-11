@@ -397,7 +397,7 @@ void show_info()
     } else if (!s_loadError.empty()) {
         const bool unreadable = s_loadError.rfind("cannot read", 0) == 0;
         std::snprintf(buf, sizeof(buf), "Not opened: %s%s", s_loadError.c_str(),
-                      unreadable ? " -- only 16-bit WAV files open here." : "");
+                      unreadable ? " -- 16-bit WAV only." : "");
     } else if (!s_frames) {
         std::snprintf(buf, sizeof(buf), "%s  reading ...", base_of(s_file).c_str());
     } else {

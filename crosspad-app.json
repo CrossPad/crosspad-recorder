@@ -15,7 +15,7 @@
     "crosspad-gui": ">=1.28.0,<3.0.0"
   },
   "changelog": [
-    "0.9.1: a take the tools cannot read (a 24-bit or float WAV, not a WAV) picked in FILES says why on the info line (Not opened: cannot read <name> -- only 16-bit WAV files open here) instead of <name>  reading ... for ever; a failed redraw of a take that did load shows its reason instead of having it overwritten at once.",
+    "0.9.1: a take the tools cannot read (a 24-bit or float WAV, not a WAV) picked in FILES says why on the info line (Not opened: cannot read <name> -- 16-bit WAV only) instead of <name>  reading ... for ever; a failed redraw of a take that did load shows its reason instead of having it overwritten at once.",
     "0.9.0: the input button names what the Mixer's PAIR connects -- MIC, LINE 1/2, LINE 3/4 (core 2.44 IInputPairs::inputOn()) -- so a take of the first or second converter says which jack it records, and follows the PAIR when it changes. Requires core 2.44.",
     "0.8.1: FX and NORM on an Arrange block write the copy into the song's clips folder itself: a bounced track plays its renders from clips/.freeze, the copy went in beside them while the block named it from clips/ -- MISSING -- and the next freeze would have swept it.",
     "0.8.0: FX beside FROM -- a window with PITCH (KEEP LENGTH: transposed, the length and the bars kept; TAPE: varispeed, as a turntable), LOW PASS and HIGH PASS, LISTEN and APPLY; APPLY renders a copy of the take beside it (<name>_p+3k_l8000.wav) and puts it on screen with the markers on the same sound, and on an Arrange block (CLIP EDIT) the block plays it at once, one commit Arrange's undo takes back -- after TAPE with the part it plays and its bars following; requires core 2.28.",
