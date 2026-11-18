@@ -975,10 +975,15 @@ lv_obj_t* overlay_item(const char* text, lv_event_cb_t cb, void* ud)
     return b;
 }
 
-void overlay_note(const char* text)
+/// A dim line of help in an overlay. It wraps at the window's width: a label
+/// with no width is as wide as its longest line and runs off the screen.
+void overlay_note(const char* text, const lv_font_t* font = nullptr)
 {
     lv_obj_t* l = lv_label_create(s_overlay);
+    if (font) lv_obj_set_style_text_font(l, font, 0);
     lv_obj_set_style_text_color(l, kDim, 0);
+    lv_obj_set_width(l, LV_PCT(100));
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
     lv_label_set_text(l, text);
 }
 
@@ -1543,9 +1548,10 @@ void show_settings()
     if (s_overlayGroup) lv_group_add_obj(s_overlayGroup, cb);
 #endif
 
-    overlay_note("START goes to the take's attack, END to where the sound\n"
-                 "stops -- the room before and after is left out of the loop.\n"
-                 "A take with no silence to cut keeps its ends.");
+    overlay_note("START goes to the take's attack, END to where the sound "
+                 "stops -- the room before and after is left out of the loop. "
+                 "A take with no silence to cut keeps its ends.",
+                 &lv_font_montserrat_10);
 
     overlay_item(LV_SYMBOL_PLAY " Play it once, as a pad would", settings_play_cb, nullptr);
 
